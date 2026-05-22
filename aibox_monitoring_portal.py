@@ -10,11 +10,11 @@ AIBox Unified Monitoring Portal — v5 (Unified Edition)
   - PollingEngine → 30s 인터벌, 수집→DB→캐시 파이프라인
   - FastAPI → 8개 REST API + SPA HTML 서빙
   - HTMLReportBuilder → 기존 리포트 레거시 보존
-
+ 
 신규 페이지:
   - Collector Health: Prometheus API 상태, 폴링 히스토리, DB 통계
 """
-
+ 
 import os, sys, json, time, ssl, logging, sqlite3, threading, re, subprocess, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -22,12 +22,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple, Final
-
+ 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 1. LOGGING
 # ════════════════════════════════════════════════════════════════════
@@ -37,7 +37,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("AIBoxPortal")
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 2. CONSTANTS
 # ════════════════════════════════════════════════════════════════════
@@ -61,7 +61,7 @@ SPARKLINE_HOURS: Final[int]    = 1
 SPARKLINE_STEP: Final[str]     = "5m"
 DB_RETENTION_HOURS: Final[int] = 24
 CYCLE_LOG_KEEP: Final[int]     = 100  # 최근 N개 폴링 사이클 보존
-
+ 
 HEALTH_JOB_CANDIDATES: Final[Dict[str, List[str]]] = {
     "api_server": ["apiserver", "kube-apiserver", "openshift-apiserver"],
     "etcd":       ["etcd", "etcd-metrics"],
@@ -70,14 +70,14 @@ HEALTH_JOB_CANDIDATES: Final[Dict[str, List[str]]] = {
     "registry":   ["openshift-image-registry", "image-registry"],
     "scheduler":  ["scheduler", "kube-scheduler"],
 }
-
+ 
 STATUS_MAP: Final[Dict[str, str]] = {
     "running": "running", "provisioning": "provisioning", "starting": "provisioning",
     "scheduling": "provisioning", "pending": "provisioning", "waitingforvolumesbinding": "provisioning",
     "stopped": "stopped", "stopping": "stopped", "terminating": "stopped", "paused": "stopped",
     "failed": "failed", "errored": "failed", "crashloopbackoff": "failed",
 }
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 3. DATA MODELS
 # ════════════════════════════════════════════════════════════════════
@@ -91,7 +91,7 @@ class ClusterHealth:
     cluster_cpu_pct: Optional[float] = None
     cluster_memory_pct: Optional[float] = None
     matched_jobs: Dict[str, str] = field(default_factory=dict)
-
+ 
 @dataclass
 class PerformanceTrend:
     etcd_wal_p99: List[float] = field(default_factory=list)
@@ -100,7 +100,7 @@ class PerformanceTrend:
     api_err_rate: List[float] = field(default_factory=list)
     api_latency_p99: List[float] = field(default_factory=list)
     time_labels: List[str] = field(default_factory=list)
-
+ 
 @dataclass
 class ClusterOperatorStatus:
     name: str
@@ -109,7 +109,7 @@ class ClusterOperatorStatus:
     progressing: Optional[bool] = None
     degraded: Optional[bool] = None
     message: str = ""
-
+ 
 @dataclass
 class MCPStatus:
     name: str
@@ -118,7 +118,7 @@ class MCPStatus:
     updated_count: int = 0
     degraded_count: int = 0
     paused: bool = False
-
+ 
 @dataclass
 class InfraMetrics:
     cluster_operators: List[ClusterOperatorStatus] = field(default_factory=list)
@@ -137,7 +137,7 @@ class InfraMetrics:
     reg_req_rate: Optional[float] = None
     reg_trend: List[float] = field(default_factory=list)
     trend_labels: List[str] = field(default_factory=list)
-
+ 
 @dataclass
 class NodeMetrics:
     name: str
@@ -149,7 +149,7 @@ class NodeMetrics:
     memory_bytes: int = 0
     cpu_pct_realtime: Optional[float] = None
     memory_pct_realtime: Optional[float] = None
-
+ 
 @dataclass
 class VMMetrics:
     name: str
@@ -170,7 +170,7 @@ class VMMetrics:
     net_tx_bps: Optional[float] = None
     disk_read_bps: Optional[float] = None
     disk_write_bps: Optional[float] = None
-
+ 
 @dataclass
 class StoragePoolDetail:
     name: str
@@ -182,7 +182,7 @@ class StoragePoolDetail:
     disk_used_bytes: int = 0
     disk_capacity_bytes: int = 0
     disk_available_bytes: int = 0
-
+ 
 @dataclass
 class SystemMetrics:
     nodes: List[NodeMetrics] = field(default_factory=list)
@@ -203,7 +203,7 @@ class SystemMetrics:
     vm_stopped_count: int = 0
     vm_failed_count: int = 0
     pvc_disk_stats: Dict[str, Dict[str, int]] = field(default_factory=dict)
-
+ 
 # 수집기 헬스 모델
 @dataclass
 class MetricCollectionResult:
@@ -212,7 +212,7 @@ class MetricCollectionResult:
     count: int = 0
     duration_ms: float = 0.0
     error: str = ""
-
+ 
 @dataclass
 class PollingCycleLog:
     cycle_id: int = 0
@@ -221,7 +221,7 @@ class PollingCycleLog:
     duration_ms: float = 0.0
     status: str = "pending"   # running / success / partial / failed
     metrics: List[MetricCollectionResult] = field(default_factory=list)
-
+ 
 @dataclass
 class PrometheusStatus:
     strategy: str = "unavailable"   # raw / route / unavailable
@@ -231,7 +231,7 @@ class PrometheusStatus:
     is_reachable: bool = False
     job_count: int = 0
     matched_jobs: Dict[str, str] = field(default_factory=dict)
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 4. SQLITE MANAGER
 # ════════════════════════════════════════════════════════════════════
@@ -239,7 +239,7 @@ class SQLiteManager:
     def __init__(self, db_file: str = DB_FILE):
         self.db_file = db_file
         self._init_db()
-
+ 
     @contextmanager
     def _conn(self):
         conn = sqlite3.connect(self.db_file, timeout=10)
@@ -252,7 +252,7 @@ class SQLiteManager:
             raise
         finally:
             conn.close()
-
+ 
     def _init_db(self) -> None:
         with self._conn() as conn:
             c = conn.cursor()
@@ -267,21 +267,21 @@ class SQLiteManager:
                     ocp_version TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_chh_ts ON cluster_health_history(timestamp);
-
+ 
                 CREATE TABLE IF NOT EXISTS node_metrics_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     node_name TEXT, cpu_pct REAL, mem_pct REAL, status TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_nmh_ts ON node_metrics_history(timestamp);
-
+ 
                 CREATE TABLE IF NOT EXISTS vm_density_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     node_name TEXT, vm_count INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_vdh_ts ON vm_density_history(timestamp);
-
+ 
                 CREATE TABLE IF NOT EXISTS vm_metrics_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -289,7 +289,7 @@ class SQLiteManager:
                     cpu_pct REAL, mem_pct REAL, status TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_vmh_ts ON vm_metrics_history(timestamp);
-
+ 
                 CREATE TABLE IF NOT EXISTS infra_snapshot (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -297,7 +297,7 @@ class SQLiteManager:
                     sched_pending INTEGER, ovn_ports INTEGER, reg_req_rate REAL
                 );
                 CREATE INDEX IF NOT EXISTS idx_is_ts ON infra_snapshot(timestamp);
-
+ 
                 CREATE TABLE IF NOT EXISTS polling_cycles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at TEXT NOT NULL,
@@ -305,7 +305,7 @@ class SQLiteManager:
                     duration_ms REAL,
                     status TEXT DEFAULT 'running'
                 );
-
+ 
                 CREATE TABLE IF NOT EXISTS metric_collection_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     cycle_id INTEGER,
@@ -316,7 +316,7 @@ class SQLiteManager:
                     error_msg TEXT DEFAULT '',
                     FOREIGN KEY(cycle_id) REFERENCES polling_cycles(id)
                 );
-
+ 
                 CREATE TABLE IF NOT EXISTS prometheus_ping_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -326,7 +326,7 @@ class SQLiteManager:
                 CREATE INDEX IF NOT EXISTS idx_ppl_ts ON prometheus_ping_log(timestamp);
             """)
         logger.info("SQLite DB initialized: %s", self.db_file)
-
+ 
     # ── 쓰기 ──────────────────────────────────────────────────────
     def store_metrics(self, metrics: SystemMetrics) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -387,14 +387,14 @@ class SQLiteManager:
                 "DELETE FROM polling_cycles WHERE id NOT IN "
                 "(SELECT id FROM polling_cycles ORDER BY id DESC LIMIT ?)", (CYCLE_LOG_KEEP,)
             )
-
+ 
     def start_cycle(self) -> int:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             c = conn.cursor()
             c.execute("INSERT INTO polling_cycles (started_at, status) VALUES (?, 'running')", (now,))
             return c.lastrowid
-
+ 
     def finish_cycle(self, cycle_id: int, duration_ms: float, status: str,
                      results: List[MetricCollectionResult]) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -410,7 +410,7 @@ class SQLiteManager:
                     "VALUES (?,?,?,?,?,?)",
                     (cycle_id, r.name, r.status, r.count, r.duration_ms, r.error),
                 )
-
+ 
     def store_prometheus_ping(self, strategy: str, host: str, latency_ms: float, reachable: bool) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
@@ -418,7 +418,7 @@ class SQLiteManager:
                 "INSERT INTO prometheus_ping_log (timestamp,strategy,host,latency_ms,is_reachable) VALUES (?,?,?,?,?)",
                 (now, strategy, host, latency_ms, int(reachable)),
             )
-
+ 
     # ── 읽기 ──────────────────────────────────────────────────────
     def get_cluster_trend(self, hours: int = 1) -> Dict[str, Any]:
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -433,7 +433,7 @@ class SQLiteManager:
             "mem": [r["mem_pct"] for r in rows],
             "alerts": [r["firing_alerts"] for r in rows],
         }
-
+ 
     def get_vm_density_trend(self, hours: int = 1) -> Dict[str, Any]:
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
@@ -451,7 +451,7 @@ class SQLiteManager:
                 seen_ts.add(ts)
             nodes.setdefault(r["node_name"], {})[ts] = r["vm_count"]
         return {"labels": labels, "nodes": {n: [d.get(l, 0) for l in labels] for n, d in nodes.items()}}
-
+ 
     def get_infra_trend(self, hours: int = 1) -> Dict[str, Any]:
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
@@ -465,7 +465,7 @@ class SQLiteManager:
             "router_5xx": [r["router_5xx_rate"] for r in rows],
             "sched_pending": [r["sched_pending"] for r in rows],
         }
-
+ 
     def get_recent_cycles(self, limit: int = 20) -> List[Dict]:
         with self._conn() as conn:
             cycles = conn.execute(
@@ -485,7 +485,7 @@ class SQLiteManager:
                     "metrics": [dict(l) for l in logs],
                 })
         return result
-
+ 
     def get_db_stats(self) -> Dict[str, Any]:
         tables = ["cluster_health_history", "node_metrics_history", "vm_density_history",
                   "vm_metrics_history", "infra_snapshot", "polling_cycles",
@@ -506,14 +506,14 @@ class SQLiteManager:
                     pass
         size = os.path.getsize(self.db_file) if os.path.exists(self.db_file) else 0
         return {"file": self.db_file, "size_bytes": size, "tables": stats}
-
+ 
     def get_prometheus_ping_history(self, limit: int = 20) -> List[Dict]:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM prometheus_ping_log ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 5. METRICS COLLECTOR
 # ════════════════════════════════════════════════════════════════════
@@ -528,7 +528,7 @@ class MetricsCollector:
         self._prom_token: str = ""
         self._prom_host: str = ""
         self._lock = threading.Lock()
-
+ 
     # ── 유틸 ──────────────────────────────────────────────────────
     def _run(self, cmd: List[str], timeout: int = CMD_TIMEOUT, silent: bool = False) -> str:
         try:
@@ -548,7 +548,7 @@ class MetricsCollector:
         except Exception as e:
             if not silent: logger.error("Error %r: %s", cmd[0], e)
             return ""
-
+ 
     @staticmethod
     def _parse_bytes(s: str) -> int:
         if not s or s in ("N/A", "0", ""): return 0
@@ -561,7 +561,7 @@ class MetricsCollector:
             return int(val * mults.get(unit, 1))
         except Exception:
             return 0
-
+ 
     @staticmethod
     def _fmt_bytes(b: int) -> str:
         if b == 0: return "0 B"
@@ -569,7 +569,7 @@ class MetricsCollector:
         v, i = float(b), 0
         while v >= 1024 and i < len(names) - 1: v /= 1024.0; i += 1
         return f"{v:.2f} {names[i]}"
-
+ 
     @staticmethod
     def _fmt_age(ts: str) -> str:
         try:
@@ -579,11 +579,11 @@ class MetricsCollector:
             return f"{h}h" if h >= 1 else f"{d.seconds // 60}m"
         except Exception:
             return ts
-
+ 
     @staticmethod
     def _classify_vm_status(s: str) -> str:
         return STATUS_MAP.get(s.lower(), "unknown")
-
+ 
     # ── Prometheus 접근 ────────────────────────────────────────────
     def init_prometheus(self) -> None:
         """Prometheus 접근 전략 탐색 (raw → route 순)"""
@@ -600,7 +600,7 @@ class MetricsCollector:
                     return
             except Exception:
                 pass
-
+ 
         token = self._run(["oc", "whoami", "-t"], timeout=10)
         if not token:
             logger.warning("Prometheus: 토큰 없음 → 수집 제한")
@@ -619,7 +619,7 @@ class MetricsCollector:
                 logger.info("Prometheus: route 전략 (%s → %s)", rn, host)
                 return
         logger.warning("Prometheus 접근 불가: 메트릭 수집 제한됨")
-
+ 
     def ping_prometheus(self) -> Tuple[bool, float]:
         """Prometheus 연결 상태 확인 → (reachable, latency_ms)"""
         if not self._prom_strategy:
@@ -637,7 +637,7 @@ class MetricsCollector:
             return ok, (time.time() - t0) * 1000
         except Exception:
             return False, (time.time() - t0) * 1000
-
+ 
     def _http_get(self, url: str, token: str, timeout: int = 10) -> Optional[dict]:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -655,14 +655,14 @@ class MetricsCollector:
             return None
         except Exception:
             return None
-
+ 
     def _query_prom_route(self, promql: str, token: str, host: str) -> Optional[List[Dict]]:
         url = f"https://{host}/api/v1/query?query={urllib.parse.quote(promql)}"
         data = self._http_get(url, token)
         if data and data.get("status") == "success":
             return data.get("data", {}).get("result", [])
         return None
-
+ 
     def _query(self, promql: str) -> List[Dict]:
         if not self._prom_strategy: return []
         if self._prom_strategy == "raw":
@@ -678,7 +678,7 @@ class MetricsCollector:
                 return []
         r = self._query_prom_route(promql, self._prom_token, self._prom_host)
         return r if r is not None else []
-
+ 
     def _query_range(self, promql: str) -> Tuple[List[float], List[str]]:
         if not self._prom_strategy: return [], []
         end_ts = int(time.time())
@@ -709,13 +709,13 @@ class MetricsCollector:
             except (ValueError, TypeError):
                 pass
         return vals, lbls
-
+ 
     def _scalar(self, results: List[Dict]) -> Optional[float]:
         try:
             return float(results[0]["value"][1]) if results else None
         except (KeyError, ValueError, IndexError):
             return None
-
+ 
     def _discover_jobs(self) -> Dict[str, str]:
         results = self._query("count by(job) (up)")
         existing = {item.get("metric", {}).get("job", "") for item in results}
@@ -727,7 +727,7 @@ class MetricsCollector:
                     break
         logger.info("Prometheus jobs 매핑: %s", matched)
         return matched
-
+ 
     # ── 수집 메서드 ────────────────────────────────────────────────
     def _timed(self, name: str, fn) -> MetricCollectionResult:
         """수집 함수를 실행하고 결과와 소요 시간을 반환"""
@@ -743,7 +743,7 @@ class MetricsCollector:
             logger.error("수집 실패 [%s]: %s", name, e)
         result.duration_ms = (time.time() - t0) * 1000
         return result
-
+ 
     def fetch_nodes(self) -> int:
         try:
             vj = self._run(["oc", "version", "-o", "json"])
@@ -780,13 +780,13 @@ class MetricsCollector:
             return len(nodes)
         except Exception as e:
             raise RuntimeError(f"nodes: {e}")
-
+ 
     def fetch_vms(self) -> int:
         try:
             vj = self._run(["oc", "get", "vm", "-A", "-o", "json"])
             if not vj: return 0
             items = json.loads(vj).get("items", [])
-
+ 
             def _vmi(name: str, ns: str) -> Dict:
                 raw = self._run(["oc", "get", "vmi", name, "-n", ns, "-o", "json"], silent=True)
                 if not raw: return {}
@@ -800,7 +800,7 @@ class MetricsCollector:
                     }
                 except Exception:
                     return {}
-
+ 
             running = [
                 (v["metadata"]["name"], v["metadata"]["namespace"]) for v in items
                 if v.get("status", {}).get("printableStatus", "") == "Running"
@@ -812,7 +812,7 @@ class MetricsCollector:
                     for fut in as_completed(futs):
                         try: vmis[futs[fut]] = fut.result()
                         except Exception: pass
-
+ 
             vms = []
             for vm in items:
                 name = vm["metadata"]["name"]
@@ -838,7 +838,7 @@ class MetricsCollector:
             return len(vms)
         except Exception as e:
             raise RuntimeError(f"vms: {e}")
-
+ 
     def fetch_storage(self) -> int:
         pools: Dict[str, StoragePoolDetail] = {}
         try:
@@ -849,7 +849,7 @@ class MetricsCollector:
                     pools[n] = StoragePoolDetail(name=n, provisioner=sc.get("provisioner", "Unknown"))
         except Exception as e:
             logger.warning("SC: %s", e)
-
+ 
         pv_data = []
         total_pv = 0
         try:
@@ -875,7 +875,7 @@ class MetricsCollector:
                                     "Age": self._fmt_age(pv["metadata"]["creationTimestamp"])})
         except Exception as e:
             logger.warning("PV: %s", e)
-
+ 
         pvc_data = []
         total_pvc = 0
         try:
@@ -894,14 +894,14 @@ class MetricsCollector:
                                      "Volume": pvc.get("spec", {}).get("volumeName", "Pending")})
         except Exception as e:
             logger.warning("PVC: %s", e)
-
+ 
         self.metrics.storage_pools = pools
         self.metrics.pv_data = pv_data
         self.metrics.pvc_data = pvc_data
         self.metrics.total_pv_capacity_bytes = total_pv
         self.metrics.total_pvc_requested_bytes = total_pvc
         return len(pools)
-
+ 
     def fetch_cluster_health(self) -> int:
         if not self._prom_strategy: return 0
         matched = self._discover_jobs()
@@ -931,7 +931,7 @@ class MetricsCollector:
                 elif k == "cpu": h.cluster_cpu_pct = val
                 elif k == "mem": h.cluster_memory_pct = val
         return len(queries)
-
+ 
     def fetch_cluster_operators(self) -> int:
         try:
             raw = self._run(["oc", "get", "clusteroperator", "-o", "json"])
@@ -960,7 +960,7 @@ class MetricsCollector:
             return len(ops)
         except Exception as e:
             raise RuntimeError(f"operators: {e}")
-
+ 
     def fetch_mcp(self) -> int:
         try:
             raw = self._run(["oc", "get", "mcp", "-o", "json"])
@@ -980,14 +980,14 @@ class MetricsCollector:
             return len(pools)
         except Exception as e:
             raise RuntimeError(f"mcp: {e}")
-
+ 
     def fetch_infra_metrics(self) -> int:
         if not self._prom_strategy: return 0
         matched = self.metrics.cluster_health.matched_jobs
         router_job = matched.get("router", "router-internal-default")
         sched_job = matched.get("scheduler", "scheduler")
         reg_job = matched.get("registry", "openshift-image-registry")
-
+ 
         instant: Dict[str, str] = {
             "router_req": f'sum(rate(haproxy_backend_http_responses_total{{job="{router_job}"}}[5m]))',
             "router_4xx": f'sum(rate(haproxy_backend_http_responses_total{{job="{router_job}",code="4xx"}}[5m]))',
@@ -1032,7 +1032,7 @@ class MetricsCollector:
                     elif k == "sched_lat_t": im.sched_lat_trend = vals
                     elif k == "reg_req_t": im.reg_trend = vals
         return len(instant)
-
+ 
     def fetch_node_realtime(self) -> int:
         if not self.metrics.nodes or not self._prom_strategy: return 0
         test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
@@ -1062,7 +1062,7 @@ class MetricsCollector:
             n.cpu_pct_realtime = d.get("cpu")
             n.memory_pct_realtime = d.get("mem")
         return len(nrt)
-
+ 
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
         queries = {
@@ -1097,7 +1097,7 @@ class MetricsCollector:
             vm.disk_read_bps = d.get("disk_r")
             vm.disk_write_bps = d.get("disk_w")
         return len(rt)
-
+ 
     def fetch_perf_trends(self) -> int:
         if not self._prom_strategy: return 0
         h = self.metrics.cluster_health
@@ -1123,13 +1123,13 @@ class MetricsCollector:
                 elif k == "ae": pt.api_err_rate = vals
                 elif k == "al": pt.api_latency_p99 = vals
         return len(tq)
-
+ 
     def collect_all(self) -> List[MetricCollectionResult]:
         """모든 메트릭 수집. 결과 목록 반환."""
         with self._lock:
             self.metrics = SystemMetrics()
             self.metrics.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+ 
         steps = [
             ("nodes", self.fetch_nodes),
             ("vms", self.fetch_vms),
@@ -1141,11 +1141,12 @@ class MetricsCollector:
             ("node_realtime", self.fetch_node_realtime),
             ("vm_realtime", self.fetch_vm_realtime),
             ("perf_trends", self.fetch_perf_trends),
+            ("pvc_disk_stats", self.fetch_pvc_disk_stats),
         ]
         results = []
         for name, fn in steps:
             results.append(self._timed(name, fn))
-
+ 
         # VM 상태 카운트
         m = self.metrics
         for vm in m.vms:
@@ -1154,7 +1155,48 @@ class MetricsCollector:
             elif vm.status_group == "stopped": m.vm_stopped_count += 1
             elif vm.status_group == "failed": m.vm_failed_count += 1
         return results
-
+ 
+    def fetch_pvc_disk_stats(self) -> int:
+        """VM별 PVC 실제 디스크 사용량 수집 (kubelet_volume_stats)"""
+        if not self._prom_strategy: return 0
+        queries = {
+            "used":     "kubelet_volume_stats_used_bytes",
+            "capacity": "kubelet_volume_stats_capacity_bytes",
+        }
+        ps: Dict[str, Dict[str, int]] = {}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                for item in fut.result():
+                    lbl = item.get("metric", {})
+                    pvc = lbl.get("persistentvolumeclaim", "")
+                    ns  = lbl.get("namespace", "")
+                    if not pvc: continue
+                    key = f"{ns}/{pvc}"
+                    try: ps.setdefault(key, {})[k] = int(float(item["value"][1]))
+                    except Exception: pass
+        self.metrics.pvc_disk_stats = ps
+        # VM별 총 디스크 사용량 계산
+        for vm in self.metrics.vms:
+            total_used = 0
+            for vol in vm.volumes:
+                pvc = vol.get("pvc", "")
+                if pvc and pvc != "N/A":
+                    key = f"{vm.namespace}/{pvc}"
+                    total_used += ps.get(key, {}).get("used", 0)
+            vm.memory_used_bytes = vm.memory_used_bytes  # 기존 유지
+            # disk_used_bytes를 net_rx_bps 재사용 대신 별도 필드로 저장
+            # volumes[0]에 disk_used 주입
+            for vol in vm.volumes:
+                pvc = vol.get("pvc", "")
+                if pvc and pvc != "N/A":
+                    key = f"{vm.namespace}/{pvc}"
+                    vol["used_bytes"] = ps.get(key, {}).get("used", 0)
+                    vol["capacity_bytes"] = ps.get(key, {}).get("capacity", 0)
+            vm._disk_used_bytes = total_used  # type: ignore[attr-defined]
+        return len(ps)
+ 
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """FastAPI가 소비할 JSON-직렬화 가능 스냅샷 반환"""
         m = self.metrics
@@ -1202,6 +1244,7 @@ class MetricsCollector:
                     "cpu_pct": vm.cpu_usage_pct, "mem_pct": vm.memory_usage_pct,
                     "net_rx_bps": vm.net_rx_bps, "net_tx_bps": vm.net_tx_bps,
                     "disk_r_bps": vm.disk_read_bps, "disk_w_bps": vm.disk_write_bps,
+                    "disk_used_bytes": getattr(vm, "_disk_used_bytes", 0),
                     "volumes": vm.volumes,
                 }
                 for vm in m.vms
@@ -1246,7 +1289,7 @@ class MetricsCollector:
                 "time_labels": m.perf_trend.time_labels,
             },
         }
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 6. POLLING ENGINE
 # ════════════════════════════════════════════════════════════════════
@@ -1259,7 +1302,7 @@ class PollingEngine:
         self.prom_status = PrometheusStatus()
         self._cache: Dict[str, Any] = {}
         self._cache_lock = threading.Lock()
-
+ 
     def start(self) -> None:
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="PollingEngine")
@@ -1267,7 +1310,7 @@ class PollingEngine:
         # 첫 번째 수집을 즉시 선행 실행 (30s 대기 없이 캐시 확보)
         threading.Thread(target=self._initial_collect, daemon=True, name="InitialCollect").start()
         logger.info("PollingEngine 시작 (interval=%ds)", POLL_INTERVAL)
-
+ 
     def _initial_collect(self) -> None:
         """앱 기동 직후 캐시를 빠르게 채우기 위한 선행 수집 (lightweight)"""
         logger.info("초기 수집 시작...")
@@ -1296,7 +1339,7 @@ class PollingEngine:
                 logger.warning("초기 HTML 리포트 생성 실패: %s", e)
         except Exception as e:
             logger.error("초기 수집 실패: %s", e)
-
+ 
     def _loop(self) -> None:
         # 최초 기동 시 Prometheus 접근 탐색
         self.collector.init_prometheus()
@@ -1315,33 +1358,33 @@ class PollingEngine:
                 logger.error("폴링 사이클 예외: %s", e)
                 results = []
                 status = "failed"
-
+ 
             duration_ms = (time.time() - t0) * 1000
             self.db.finish_cycle(cycle_id, duration_ms, status, results)
-
+ 
             # Prometheus ping 기록
             reachable, lat = self.collector.ping_prometheus()
             self.db.store_prometheus_ping(
                 self.collector._prom_strategy, self.collector._prom_host, lat, reachable
             )
             self._update_prom_status(reachable, lat)
-
+ 
             # 캐시 갱신
             with self._cache_lock:
                 self._cache = self.collector.get_metrics_snapshot()
-
+ 
             # HTML 리포트 생성 (Full Report 탭용)
             try:
                 HTMLReportBuilder().build(self.collector.metrics, REPORT_HTML)
             except Exception as e:
                 logger.warning("HTML 리포트 생성 실패: %s", e)
-
+ 
             logger.info("--- Polling cycle #%d 완료 (%.0fms, %s) ---", cycle_id, duration_ms, status)
-
+ 
             elapsed = time.time() - t0
             sleep_time = max(0, POLL_INTERVAL - elapsed)
             time.sleep(sleep_time)
-
+ 
     def _update_prom_status(self, reachable: bool = True, lat: float = 0.0) -> None:
         s = self.prom_status
         s.strategy = self.collector._prom_strategy or "unavailable"
@@ -1350,12 +1393,12 @@ class PollingEngine:
         s.last_ping_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         s.last_ping_latency_ms = lat
         s.matched_jobs = self.collector.metrics.cluster_health.matched_jobs
-
+ 
     def get_cache(self) -> Dict[str, Any]:
         with self._cache_lock:
             return dict(self._cache)
-
-
+ 
+ 
 # ════════════════════════════════════════════════════════════════════
 # 6b. HTML REPORT BUILDER  (vm_metrics_report.py 기능 통합)
 # ════════════════════════════════════════════════════════════════════
@@ -1364,7 +1407,7 @@ class HTMLReportBuilder:
     수집된 SystemMetrics를 받아 vm_metrics_report.py 스타일의
     정적 HTML 리포트를 생성한다.
     """
-
+ 
     @staticmethod
     def _fmt_bytes(b: int) -> str:
         if b == 0: return "0 B"
@@ -1372,18 +1415,18 @@ class HTMLReportBuilder:
         v, i = float(b), 0
         while v >= 1024 and i < len(names) - 1: v /= 1024.0; i += 1
         return f"{v:.2f} {names[i]}"
-
+ 
     @staticmethod
     def _fmt_pct(v) -> str:
         return f"{v:.1f}%" if v is not None else "N/A"
-
+ 
     @staticmethod
     def _pct_color(v) -> str:
         if v is None: return "#64748b"
         if v < 70: return "#10b981"
         if v < 90: return "#f59e0b"
         return "#ef4444"
-
+ 
     @staticmethod
     def _pct_bar(v, label="") -> str:
         c = HTMLReportBuilder._pct_color(v)
@@ -1394,7 +1437,7 @@ class HTMLReportBuilder:
                 f"<span>{escape(label)}</span><span style='color:{c};font-weight:700'>{txt}</span></div>"
                 f"<div style='background:#1e293b;border-radius:3px;height:5px;overflow:hidden'>"
                 f"<div style='background:{c};height:5px;border-radius:3px;width:{w}%'></div></div></div>")
-
+ 
     @staticmethod
     def _status_badge(sg: str) -> str:
         m = {"running": ("#10b981","Running"), "stopped": ("#64748b","Stopped"),
@@ -1403,16 +1446,16 @@ class HTMLReportBuilder:
         c, t = m.get(sg, ("#475569","Unknown"))
         return (f"<span style='background:{c}22;color:{c};border:1px solid {c}55;"
                 f"padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700'>{t}</span>")
-
+ 
     def build(self, m: SystemMetrics, report_file: str = REPORT_HTML) -> None:
         h = m.cluster_health
         im = m.infra
-
+ 
         # ── 클러스터 오퍼레이터 요약 ──────────────────────────────
         ok_ops  = sum(1 for o in im.cluster_operators if o.available and not o.degraded)
         deg_ops = sum(1 for o in im.cluster_operators if o.degraded)
         prog_ops= sum(1 for o in im.cluster_operators if o.progressing and not o.degraded)
-
+ 
         op_cells = ""
         for op in sorted(im.cluster_operators,
                          key=lambda o: (not o.degraded, not o.progressing, o.name)):
@@ -1431,7 +1474,7 @@ class HTMLReportBuilder:
                 f"<div style='font-size:10px;color:{c};padding-left:12px;font-family:monospace'>{escape(op.version)}</div>"
                 f"</div>"
             )
-
+ 
         # ── 노드 행 ─────────────────────────────────────────────
         node_rows = ""
         for n in m.nodes:
@@ -1447,7 +1490,7 @@ class HTMLReportBuilder:
                 f"<td style='font-family:monospace'>{escape(n.memory_usage)}</td>"
                 f"<td>{self._pct_bar(n.memory_pct_realtime)}</td></tr>"
             )
-
+ 
         # ── VM 행 ────────────────────────────────────────────────
         vm_rows = ""
         prev_ns = None
@@ -1475,7 +1518,7 @@ class HTMLReportBuilder:
                 f"<td style='font-size:11px;color:#64748b'>{escape(vm.os_info[:30])}</td>"
                 f"<td style='font-size:11px'>{escape(vm.creation_time)}</td></tr>"
             )
-
+ 
         # ── 스토리지 풀 행 ───────────────────────────────────────
         pool_rows = ""
         for p in m.storage_pools.values():
@@ -1489,7 +1532,7 @@ class HTMLReportBuilder:
                 f"<td>{self._fmt_bytes(p.used_capacity_bytes)}</td>"
                 f"<td>{self._pct_bar(used_pct)}</td></tr>"
             )
-
+ 
         # ── 인프라 서비스 카드 ───────────────────────────────────
         def svc_card(title, color, items):
             rows = "".join(
@@ -1505,14 +1548,14 @@ class HTMLReportBuilder:
                 f"<span style='font-size:11px;font-weight:700;color:#e2e8f0;letter-spacing:.05em'>{title}</span></div>"
                 f"<div style='padding:8px 12px'>{rows}</div></div>"
             )
-
+ 
         svc_cards = svc_card("INGRESS ROUTER", "#06b6d4", [
             ("Req/s",    f"{im.router_req_rate:.1f}/s" if im.router_req_rate is not None else "N/A", "#06b6d4"),
             ("4xx/s",    f"{im.router_4xx_rate:.2f}/s" if im.router_4xx_rate is not None else "N/A", "#f59e0b"),
             ("5xx/s",    f"{im.router_5xx_rate:.2f}/s" if im.router_5xx_rate is not None else "N/A", "#ef4444"),
             ("Sessions", str(int(im.router_sessions)) if im.router_sessions is not None else "N/A", "#3b82f6"),
         ])
-
+ 
         sc_pend = im.sched_pending
         sc_c    = "#ef4444" if sc_pend and sc_pend > 10 else "#10b981"
         svc_cards += svc_card("SCHEDULER", "#a78bfa", [
@@ -1526,7 +1569,7 @@ class HTMLReportBuilder:
         svc_cards += svc_card("IMAGE REGISTRY", "#34d399", [
             ("Req/s", f"{im.reg_req_rate:.2f}/s" if im.reg_req_rate is not None else "N/A", "#34d399"),
         ])
-
+ 
         # ── MCP 카드 ─────────────────────────────────────────────
         mcp_html = ""
         for p in im.mcp_pools:
@@ -1551,7 +1594,7 @@ class HTMLReportBuilder:
                 f"<div style='font-weight:700;color:{"#ef4444" if dg else "#64748b"}'>{p.degraded_count}</div></div>"
                 f"</div></div>"
             )
-
+ 
         # ── 헬스 카드 ────────────────────────────────────────────
         def hcard(label, v):
             ok = v is not None and v >= 1
@@ -1562,36 +1605,17 @@ class HTMLReportBuilder:
                     f"<div style='width:10px;height:10px;border-radius:50%;background:{c};flex-shrink:0'></div>"
                     f"<div><div style='font-size:10px;color:#64748b;margin-bottom:2px'>{label}</div>"
                     f"<div style='font-weight:700;color:{c}'>{t}</div></div></div>")
-
-        # ── PV 행 (f-string 중첩 회피) ──────────────────────────────
-        pv_rows_html = ""
-        for p in m.pv_data:
-            n   = escape(p.get("Name",""))
-            cap = escape(p.get("Capacity",""))
-            st  = escape(p.get("Status",""))
-            sc  = escape(p.get("StorageClass",""))
-            cl  = escape(p.get("Claim",""))
-            ag  = escape(p.get("Age",""))
-            sc_c = "#10b981" if p.get("Status") == "Bound" else "#f59e0b"
-            pv_rows_html += (
-                f"<tr><td style='font-family:monospace;font-size:11px'>{n}</td>"
-                f"<td>{cap}</td>"
-                f"<td><span style='color:{sc_c}'>{st}</span></td>"
-                f"<td style='font-size:11px;color:#64748b'>{sc}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{cl}</td>"
-                f"<td style='font-size:11px'>{ag}</td></tr>"
-            )
-
+ 
         # ── HTML 조립 ─────────────────────────────────────────────
         vm_run = sum(1 for v in m.vms if v.status_group == "running")
         vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
         vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
         vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
-
+ 
         tbl_style = "width:100%;border-collapse:collapse;font-size:12px"
         th_style  = "padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap"
         td_style  = "padding:7px 10px;border-bottom:1px solid #0f172a"
-
+ 
         html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1622,7 +1646,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
   <h1>⬡ AIBox Infrastructure Report</h1>
   <p style="color:#64748b;font-size:12px">OCP {escape(m.ocp_version)} &nbsp;·&nbsp; 생성: {escape(m.last_updated)} &nbsp;·&nbsp; 30초 자동 갱신</p>
 </div>
-
+ 
 <!-- KPI -->
 <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:20px">
   <div class="kpi"><div class="l">Nodes</div><div class="v">{len(m.nodes)}</div></div>
@@ -1635,7 +1659,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
   <div class="kpi"><div class="l">Cluster Mem</div><div class="v" style="color:{self._pct_color(h.cluster_memory_pct)}">{self._fmt_pct(h.cluster_memory_pct)}</div></div>
   <div class="kpi"><div class="l" style="color:{"#ef4444" if h.firing_alerts else "#10b981"}">Firing Alerts</div><div class="v" style="color:{"#ef4444" if h.firing_alerts else "#10b981"}">{h.firing_alerts}</div></div>
 </div>
-
+ 
 <!-- Cluster Health -->
 <div class="sec">
   <h2>Cluster Health</h2>
@@ -1646,7 +1670,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     {hcard("ETCD Leader", h.etcd_leader)}
   </div>
 </div>
-
+ 
 <!-- Infrastructure Services -->
 <div class="sec">
   <h2>Infrastructure Services</h2>
@@ -1654,7 +1678,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     {svc_cards}
   </div>
 </div>
-
+ 
 <!-- Cluster Operators -->
 <div class="sec">
   <h2>Cluster Operators &nbsp;
@@ -1666,7 +1690,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     {op_cells}
   </div>
 </div>
-
+ 
 <!-- MachineConfigPool -->
 <div class="sec">
   <h2>MachineConfigPool</h2>
@@ -1674,7 +1698,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     {mcp_html or "<p style='color:#64748b;font-size:12px'>데이터 없음</p>"}
   </div>
 </div>
-
+ 
 <!-- Nodes -->
 <div class="sec">
   <h2>Nodes ({len(m.nodes)})</h2>
@@ -1688,7 +1712,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     </table>
   </div>
 </div>
-
+ 
 <!-- Virtual Machines -->
 <div class="sec">
   <h2>Virtual Machines ({len(m.vms)}) — 네임스페이스별</h2>
@@ -1703,7 +1727,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     </table>
   </div>
 </div>
-
+ 
 <!-- Storage -->
 <div class="sec">
   <h2>Storage Pools (PV: {len(m.pv_data)}, PVC: {len(m.pvc_data)})</h2>
@@ -1723,21 +1747,29 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     <div style="overflow-x:auto;margin-top:8px">
       <table>
         <thead><tr><th>Name</th><th>Capacity</th><th>Status</th><th>StorageClass</th><th>Claim</th><th>Age</th></tr></thead>
-        <tbody>{pv_rows_html}</tbody>
+        <tbody>{"".join(
+            f"<tr><td style='font-family:monospace;font-size:11px'>{escape(p.get("Name",""))}</td>"
+            f"<td>{escape(p.get("Capacity",""))}</td>"
+            f"<td><span style='color:{"#10b981" if p.get("Status")=="Bound" else "#f59e0b"}'>{escape(p.get("Status",""))}</span></td>"
+            f"<td style='font-size:11px;color:#64748b'>{escape(p.get("StorageClass",""))}</td>"
+            f"<td style='font-size:11px;color:#94a3b8'>{escape(p.get("Claim",""))}</td>"
+            f"<td style='font-size:11px'>{escape(p.get("Age",""))}</td></tr>"
+            for p in m.pv_data
+        )}</tbody>
       </table>
     </div>
   </details>
 </div>
-
+ 
 <div style="text-align:center;color:#334155;font-size:11px;margin-top:16px">
   AIBox Unified Monitoring Portal v5 &nbsp;·&nbsp; {escape(m.last_updated)}
 </div>
 </body></html>"""
-
+ 
         with open(report_file, "w", encoding="utf-8") as f:
             f.write(html)
         logger.info("HTML 리포트 생성 완료: %s (%d bytes)", report_file, len(html))
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 7. FASTAPI APPLICATION
 # ════════════════════════════════════════════════════════════════════
@@ -1747,15 +1779,15 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
-
+ 
 _collector = MetricsCollector()
 _db = SQLiteManager()
 _engine = PollingEngine(_collector, _db)
-
+ 
 @app.on_event("startup")
 def on_startup():
     _engine.start()
-
+ 
 # ── Health (always responds) ──────────────────────────────────────
 @app.get("/api/v1/health")
 def api_health():
@@ -1767,7 +1799,7 @@ def api_health():
         "prom_reachable": _engine.prom_status.is_reachable,
         "last_updated": cache.get("last_updated") if cache else None,
     })
-
+ 
 # ── Overview ──────────────────────────────────────────────────────
 _EMPTY_SKELETON: Dict[str, Any] = {
     "is_collecting": True,
@@ -1785,20 +1817,20 @@ _EMPTY_SKELETON: Dict[str, Any] = {
     "perf": {"etcd_wal_p99": [], "etcd_peer_rtt": [], "api_req_rate": [],
              "api_err_rate": [], "api_latency_p99": [], "time_labels": []},
 }
-
+ 
 @app.get("/api/v1/overview")
 def api_overview():
     cache = _engine.get_cache()
     if not cache:
         return JSONResponse({**_EMPTY_SKELETON})
     return JSONResponse({**cache, "is_collecting": False})
-
+ 
 # ── Nodes ─────────────────────────────────────────────────────────
 @app.get("/api/v1/nodes")
 def api_nodes():
     cache = _engine.get_cache()
     return JSONResponse({"nodes": cache.get("nodes", []), "last_updated": cache.get("last_updated")})
-
+ 
 # ── VMs ───────────────────────────────────────────────────────────
 @app.get("/api/v1/vms")
 def api_vms(namespace: Optional[str] = None, status: Optional[str] = None):
@@ -1807,25 +1839,25 @@ def api_vms(namespace: Optional[str] = None, status: Optional[str] = None):
     if namespace: vms = [v for v in vms if v["namespace"] == namespace]
     if status: vms = [v for v in vms if v["status_group"] == status]
     return JSONResponse({"vms": vms, "last_updated": cache.get("last_updated")})
-
+ 
 # ── Storage ───────────────────────────────────────────────────────
 @app.get("/api/v1/storage")
 def api_storage():
     cache = _engine.get_cache()
     return JSONResponse({"storage": cache.get("storage", {}), "last_updated": cache.get("last_updated")})
-
+ 
 # ── Infrastructure ────────────────────────────────────────────────
 @app.get("/api/v1/infra")
 def api_infra():
     cache = _engine.get_cache()
     return JSONResponse({"infra": cache.get("infra", {}), "last_updated": cache.get("last_updated")})
-
+ 
 # ── Performance Trends ────────────────────────────────────────────
 @app.get("/api/v1/performance")
 def api_performance():
     cache = _engine.get_cache()
     return JSONResponse({"perf": cache.get("perf", {}), "last_updated": cache.get("last_updated")})
-
+ 
 # ── Historical Trends (SQLite) ────────────────────────────────────
 @app.get("/api/v1/trends/{key}")
 def api_trends(key: str, hours: int = Query(1, ge=1, le=24)):
@@ -1833,7 +1865,7 @@ def api_trends(key: str, hours: int = Query(1, ge=1, le=24)):
     elif key == "vm_density": return JSONResponse(_db.get_vm_density_trend(hours))
     elif key == "infra": return JSONResponse(_db.get_infra_trend(hours))
     else: raise HTTPException(404, f"Unknown trend key: {key}")
-
+ 
 # ── Collector Health ──────────────────────────────────────────────
 @app.get("/api/v1/collector")
 def api_collector_health():
@@ -1841,13 +1873,13 @@ def api_collector_health():
     cycles = _db.get_recent_cycles(20)
     db_stats = _db.get_db_stats()
     ping_hist = _db.get_prometheus_ping_history(20)
-
+ 
     # 최근 1시간 성공률
     total = len(cycles)
     success = sum(1 for c in cycles if c["status"] == "success")
     partial = sum(1 for c in cycles if c["status"] == "partial")
     success_rate = (success + partial * 0.5) / total * 100 if total else 0
-
+ 
     # 메트릭별 집계
     metric_stats: Dict[str, Dict] = {}
     for cycle in cycles:
@@ -1860,7 +1892,7 @@ def api_collector_health():
             elif m["status"] == "failed": ms["failed"] += 1
             ms["total_ms"] += m.get("duration_ms", 0) or 0
             ms["count"] += 1
-
+ 
     metric_summary = [
         {
             "name": name,
@@ -1871,7 +1903,7 @@ def api_collector_health():
         }
         for name, s in metric_stats.items()
     ]
-
+ 
     return JSONResponse({
         "prometheus": {
             "strategy": ps.strategy,
@@ -1892,19 +1924,19 @@ def api_collector_health():
         "database": db_stats,
         "prometheus_ping_history": ping_hist,
     })
-
+ 
 # ── Legacy Report ─────────────────────────────────────────────────
 @app.get("/report.html")
 def serve_report():
     if os.path.exists(REPORT_HTML):
         return FileResponse(REPORT_HTML)
     return HTMLResponse("<h1>리포트 생성 중입니다. 최대 30초 대기 후 새로 고침하세요.</h1>", status_code=202)
-
+ 
 # ── SPA Dashboard ─────────────────────────────────────────────────
 @app.get("/")
 def serve_dashboard():
     return HTMLResponse(SPA_HTML)
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 8. SPA HTML TEMPLATE
 # ════════════════════════════════════════════════════════════════════
@@ -2042,12 +2074,12 @@ SPA_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-
+ 
 <div id="loading">
   <div class="spinner"></div>
   <p style="font-size:13px;color:var(--txt-secondary);">데이터 수집 대기 중...</p>
 </div>
-
+ 
 <div id="app" style="display:none;">
   <!-- SIDEBAR -->
   <div id="sidebar">
@@ -2084,10 +2116,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
         Collector Health
       </div>
-      <div class="sb-item" data-page="legacy">
-        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-        Full Report
-      </div>
+ 
     </nav>
     <div class="sb-footer">
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -2098,7 +2127,7 @@ SPA_HTML = r"""<!DOCTYPE html>
       <div class="version" style="margin-top:2px;">30s auto-refresh</div>
     </div>
   </div>
-
+ 
   <!-- MAIN -->
   <div id="main">
     <div id="topbar">
@@ -2112,7 +2141,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <span id="countdown" style="font-size:12px;font-weight:700;color:var(--accent);font-family:monospace;">30s</span>
       </div>
     </div>
-
+ 
     <!-- 수집 중 배너 -->
     <div id="collecting-banner" style="display:none;align-items:center;gap:10px;
       background:rgba(245,158,11,.1);border-bottom:1px solid rgba(245,158,11,.25);
@@ -2122,32 +2151,66 @@ SPA_HTML = r"""<!DOCTYPE html>
       완료되면 자동으로 업데이트됩니다.</span>
       <a href="/api/v1/health" target="_blank" style="margin-left:auto;color:#fbbf24;text-decoration:underline;font-size:11px;">진단 확인</a>
     </div>
-
+ 
     <div id="content">
       <!-- PAGE: OVERVIEW -->
       <div id="page-overview" class="page">
-        <div class="kpi-grid" id="kpi-row"></div>
+        <!-- KPI Row -->
+        <div class="kpi-grid" id="kpi-row" style="margin-bottom:14px;"></div>
+ 
+        <!-- Row 2: Health + Infra quick status -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
           <div class="card">
             <div class="sec-title">Cluster Health</div>
             <div id="health-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
           </div>
           <div class="card">
-            <div class="sec-title">VM Status Distribution</div>
-            <div id="vm-status-chart" style="height:140px;display:flex;align-items:center;justify-content:center;"></div>
+            <div class="sec-title">Infrastructure Services</div>
+            <div id="infra-quick" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
           </div>
         </div>
-        <div class="card">
-          <div class="sec-title" style="justify-content:space-between;">
-            CPU · Memory Trend (1h)
-            <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">SQLite 수집 이력</span>
+ 
+        <!-- Row 3: Top 5 Panels -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="card">
+            <div class="sec-title" style="color:var(--accent2);">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+              Top 5 · CPU
+            </div>
+            <div id="top5-cpu"></div>
           </div>
-          <div class="chart-wrap" style="height:160px;">
-            <canvas id="chart-cluster-trend"></canvas>
+          <div class="card">
+            <div class="sec-title" style="color:#a78bfa;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/></svg>
+              Top 5 · Memory
+            </div>
+            <div id="top5-mem"></div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="color:#34d399;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+              Top 5 · Disk Used
+            </div>
+            <div id="top5-disk"></div>
+          </div>
+        </div>
+ 
+        <!-- Row 4: Trend Charts -->
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;">
+          <div class="card">
+            <div class="sec-title" style="justify-content:space-between;">
+              CPU · Memory Trend (1h)
+              <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">30s SQLite 이력</span>
+            </div>
+            <div class="chart-wrap" style="height:150px;"><canvas id="chart-cluster-trend"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="sec-title">VM Status</div>
+            <div id="vm-status-chart" style="padding-top:4px;"></div>
           </div>
         </div>
       </div>
-
+ 
       <!-- PAGE: NODES -->
       <div id="page-nodes" class="page" style="display:none;">
         <div class="card">
@@ -2163,7 +2226,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
+ 
       <!-- PAGE: VMS -->
       <div id="page-vms" class="page" style="display:none;">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
@@ -2196,7 +2259,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
+ 
       <!-- PAGE: STORAGE -->
       <div id="page-storage" class="page" style="display:none;">
         <div class="card" style="margin-bottom:14px;">
@@ -2224,7 +2287,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
+ 
       <!-- PAGE: INFRA -->
       <div id="page-infra" class="page" style="display:none;">
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px;" id="infra-service-cards"></div>
@@ -2240,7 +2303,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           <div id="mcp-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;"></div>
         </div>
       </div>
-
+ 
       <!-- PAGE: PERFORMANCE -->
       <div id="page-performance" class="page" style="display:none;">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
@@ -2268,7 +2331,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
+ 
       <!-- PAGE: COLLECTOR HEALTH -->
       <div id="page-collector" class="page" style="display:none;">
         <!-- Prometheus Status -->
@@ -2313,15 +2376,10 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
-      <!-- PAGE: LEGACY REPORT -->
-      <div id="page-legacy" class="page" style="display:none;height:calc(100vh - 100px);">
-        <iframe src="/report.html" style="width:100%;height:100%;border:none;border-radius:8px;background:#fff;"></iframe>
-      </div>
-    </div>
+</div>
   </div>
 </div>
-
+ 
 <script>
 // ═══════════════════════════════════════════════
 // STATE
@@ -2334,7 +2392,7 @@ let state = {
   countdown: 30,
   timer: null,
 };
-
+ 
 // ═══════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════
@@ -2351,7 +2409,7 @@ document.getElementById('nav').addEventListener('click', e => {
   if (page === 'collector') fetchCollector();
   if (page === 'performance') renderPerformance(state.overview);
 });
-
+ 
 // ═══════════════════════════════════════════════
 // FETCH
 // ═══════════════════════════════════════════════
@@ -2380,12 +2438,12 @@ async function fetchAll() {
   }
   finally { document.getElementById('refresh-spinner').style.display = 'none'; }
 }
-
+ 
 async function fetchCollector() {
   const data = await fetch('/api/v1/collector').then(r => r.ok ? r.json() : null);
   if (data) { state.collector = data; renderCollector(data); }
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER HELPERS
 // ═══════════════════════════════════════════════
@@ -2415,7 +2473,7 @@ const healthDot = v => {
   if (v == null) return '<span class="dot dot-off"></span>';
   return v >= 1 ? '<span class="dot dot-ok"></span>' : '<span class="dot dot-err"></span>';
 };
-
+ 
 function mkChart(id, labels, datasets, opts = {}) {
   const canvas = document.getElementById(id);
   if (!canvas) return;
@@ -2440,7 +2498,7 @@ function mkChart(id, labels, datasets, opts = {}) {
     },
   });
 }
-
+ 
 function sparkDataset(label, data, color) {
   return {
     label, data,
@@ -2449,76 +2507,162 @@ function sparkDataset(label, data, color) {
     fill: true,
   };
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: OVERVIEW
 // ═══════════════════════════════════════════════
+function renderTop5(elId, items, valFn, color) {
+  if (!items || !items.length) {
+    document.getElementById(elId).innerHTML =
+      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">데이터 수집 중...</div>';
+    return;
+  }
+  document.getElementById(elId).innerHTML = items.map((vm, i) => {
+    const val = valFn(vm);
+    const pct = typeof val === 'number' ? Math.min(val, 100) : 0;
+    const label = typeof val === 'number' ? (elId.includes('disk') ? fmtBytes(vm.disk_used_bytes||0) : fmtPct(val)) : '—';
+    return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+          <div style="min-width:0;">
+            <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
+            <div style="font-size:10px;color:var(--txt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.namespace}</div>
+          </div>
+        </div>
+        <span style="font-size:12px;font-weight:700;color:${color};flex-shrink:0;margin-left:6px;">${label}</span>
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${pct}%;"></div></div>
+    </div>`;
+  }).join('');
+}
+ 
 function renderOverview(d) {
   const c = d.cluster, ct = d.counts;
-  // KPI
-  document.getElementById('kpi-row').innerHTML = [
-    { label:'OCP Version', value: d.ocp_version, sub:'', color:'var(--accent)' },
-    { label:'Total Nodes', value: ct.nodes, sub:'', color:'var(--txt-primary)' },
-    { label:'VMs Running', value: ct.vms_running, sub:`/ ${ct.vms_total} total`, color:'var(--success)' },
-    { label:'VMs Stopped', value: ct.vms_stopped, sub:'', color:'var(--txt-muted)' },
-    { label:'VMs Failed', value: ct.vms_failed, sub:'', color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)' },
-    { label:'Firing Alerts', value: c.firing_alerts, sub:'', color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)' },
-    { label:'Cluster CPU', value: fmtPct(c.cpu_pct), sub:'', color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)' },
-    { label:'Cluster Mem', value: fmtPct(c.mem_pct), sub:'', color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)' },
-  ].map(k => `
+ 
+  // ── KPI 카드 ──
+  const kpis = [
+    { label:'OCP Version',    value: d.ocp_version,     color:'var(--accent)',   sub:'' },
+    { label:'Nodes',          value: ct.nodes,           color:'var(--txt-primary)', sub:'' },
+    { label:'Running VMs',    value: ct.vms_running,     color:'var(--success)', sub:`/ ${ct.vms_total}` },
+    { label:'Stopped VMs',    value: ct.vms_stopped,     color:'var(--txt-muted)', sub:'' },
+    { label:'Provisioning',   value: ct.vms_provisioning,color:'var(--warn)',    sub:'' },
+    { label:'Failed VMs',     value: ct.vms_failed,      color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)', sub:'' },
+    { label:'Cluster CPU',    value: fmtPct(c.cpu_pct),  color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
+    { label:'Cluster Mem',    value: fmtPct(c.mem_pct),  color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
+    { label:'Firing Alerts',  value: c.firing_alerts,    color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)', sub:'' },
+    { label:'Operators OK',   value: `${(d.infra?.cluster_operators||[]).filter(o=>o.available&&!o.degraded).length} / ${ct.cluster_operators}`, color:'var(--success)', sub:'' },
+    { label:'PV / PVC',       value: `${ct.pv} / ${ct.pvc}`, color:'var(--accent2)', sub:'' },
+    { label:'Storage Pools',  value: ct.storage_pools,   color:'var(--txt-secondary)', sub:'' },
+  ];
+  document.getElementById('kpi-row').innerHTML = kpis.map(k => `
     <div class="kpi">
       <div class="label">${k.label}</div>
-      <div class="value" style="color:${k.color}">${k.value}</div>
+      <div class="value" style="color:${k.color};font-size:${String(k.value).length > 6 ? '16px' : '22px'}">${k.value}</div>
       ${k.sub ? `<div class="sub">${k.sub}</div>` : ''}
-    </div>
-  `).join('');
-
+    </div>`).join('');
+ 
   // Alert badge
   const ab = document.getElementById('alert-badge');
-  if (c.firing_alerts > 0) {
-    ab.style.display = '';
-    ab.textContent = `${c.firing_alerts} Firing Alerts`;
-  } else { ab.style.display = 'none'; }
-
-  // Health cards
+  if (c.firing_alerts > 0) { ab.style.display = ''; ab.textContent = `${c.firing_alerts} Firing Alerts`; }
+  else { ab.style.display = 'none'; }
+ 
+  // ── Cluster Health 카드 ──
   document.getElementById('health-cards').innerHTML = [
     { label:'API Server', v: c.api_server },
-    { label:'ETCD', v: c.etcd },
-    { label:'CoreDNS', v: c.coredns },
-    { label:'ETCD Leader', v: c.etcd_leader },
+    { label:'ETCD',       v: c.etcd },
+    { label:'CoreDNS',    v: c.coredns },
+    { label:'ETCD Leader',v: c.etcd_leader },
   ].map(h => {
-    const ok = h.v != null && h.v >= 1;
-    const unk = h.v == null;
+    const ok = h.v != null && h.v >= 1, unk = h.v == null;
     const cls = unk ? 'badge-off' : ok ? 'badge-ok' : 'badge-err';
     const txt = unk ? 'N/A' : ok ? 'Healthy' : 'Unhealthy';
     return `<div class="card-sm" style="display:flex;align-items:center;gap:8px;">
-      <span class="dot ${unk ? 'dot-off' : ok ? 'dot-ok' : 'dot-err'}"></span>
+      <span class="dot ${unk?'dot-off':ok?'dot-ok':'dot-err'}"></span>
       <div>
         <div style="font-size:11px;color:var(--txt-muted);">${h.label}</div>
         <div class="badge ${cls}" style="margin-top:3px;">${txt}</div>
       </div>
     </div>`;
   }).join('');
-
-  // VM Status donut (simple bars)
-  const total = ct.vms_total || 1;
-  document.getElementById('vm-status-chart').innerHTML = `
-    <div style="width:100%;">
-      ${[['Running', ct.vms_running, 'var(--success)'],
-         ['Stopped', ct.vms_stopped, 'var(--txt-muted)'],
-         ['Provisioning', ct.vms_provisioning, 'var(--warn)'],
-         ['Failed', ct.vms_failed, 'var(--danger)'],
-        ].map(([lbl, cnt, color]) => `
-        <div style="margin-bottom:8px;">
-          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
-            <span style="color:var(--txt-secondary);">${lbl}</span>
-            <span style="color:${color};font-weight:600;">${cnt}</span>
+ 
+  // ── Infra Quick Status ──
+  const im = d.infra || {};
+  const r = im.router || {};
+  document.getElementById('infra-quick').innerHTML = [
+    { label:'Router Req/s',    v: r.req_rate != null ? r.req_rate.toFixed(1)+'/s' : '—',   ok: r.req_rate != null },
+    { label:'Router 5xx/s',   v: r['5xx_rate'] != null ? r['5xx_rate'].toFixed(2)+'/s':'—', ok: r['5xx_rate'] != null && r['5xx_rate'] < 1 },
+    { label:'Pending Pods',   v: im.scheduler?.pending != null ? Math.round(im.scheduler.pending) : '—', ok: (im.scheduler?.pending||0) < 5 },
+    { label:'OVN Ports',      v: im.ovn?.ports != null ? Math.round(im.ovn.ports) : '—',   ok: im.ovn?.ports != null },
+    { label:'Registry Req/s', v: im.registry?.req_rate != null ? im.registry.req_rate.toFixed(2)+'/s':'—', ok: im.registry?.req_rate != null },
+    { label:'Operators Deg.', v: (im.cluster_operators||[]).filter(o=>o.degraded).length,   ok: (im.cluster_operators||[]).filter(o=>o.degraded).length === 0 },
+  ].map(({label,v,ok}) => `
+    <div class="card-sm" style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span class="dot ${ok?'dot-ok':'dot-warn'}"></span>
+        <span style="font-size:11px;color:var(--txt-secondary);">${label}</span>
+      </div>
+      <span style="font-size:12px;font-weight:700;color:var(--txt-primary);">${v}</span>
+    </div>`).join('');
+ 
+  // ── Top 5 VMs ──
+  const vms = d.vms || [];
+  const running = vms.filter(v => v.status_group === 'running');
+ 
+  // CPU Top 5
+  const top5cpu = [...running].filter(v => v.cpu_pct != null)
+    .sort((a,b) => (b.cpu_pct||0) - (a.cpu_pct||0)).slice(0,5);
+  renderTop5('top5-cpu', top5cpu, v => v.cpu_pct, '#3b82f6');
+ 
+  // Memory Top 5
+  const top5mem = [...running].filter(v => v.mem_pct != null)
+    .sort((a,b) => (b.mem_pct||0) - (a.mem_pct||0)).slice(0,5);
+  renderTop5('top5-mem', top5mem, v => v.mem_pct, '#a78bfa');
+ 
+  // Disk Top 5 (disk_used_bytes 기준, running 아닌 것도 포함)
+  const top5disk = [...vms].filter(v => (v.disk_used_bytes||0) > 0)
+    .sort((a,b) => (b.disk_used_bytes||0) - (a.disk_used_bytes||0)).slice(0,5);
+  // disk는 절대값 비교 — 최대값 대비 %로 bar 표시
+  const maxDisk = top5disk[0]?.disk_used_bytes || 1;
+  if (top5disk.length) {
+    document.getElementById('top5-disk').innerHTML = top5disk.map((vm,i) => {
+      const pct = Math.round((vm.disk_used_bytes||0) / maxDisk * 100);
+      return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+            <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+            <div style="min-width:0;">
+              <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
+              <div style="font-size:10px;color:var(--txt-muted);">${vm.namespace}</div>
+            </div>
           </div>
-          <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%"></div></div>
-        </div>`).join('')}
-    </div>`;
-
-  // Fetch trend and chart it
+          <span style="font-size:12px;font-weight:700;color:#34d399;flex-shrink:0;margin-left:6px;">${fmtBytes(vm.disk_used_bytes||0)}</span>
+        </div>
+        <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%;"></div></div>
+      </div>`;
+    }).join('');
+  } else {
+    document.getElementById('top5-disk').innerHTML =
+      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">수집 중 (30s 후 표시)</div>';
+  }
+ 
+  // ── VM Status 바 ──
+  const total = ct.vms_total || 1;
+  document.getElementById('vm-status-chart').innerHTML = [
+    ['Running',     ct.vms_running,     'var(--success)'],
+    ['Stopped',     ct.vms_stopped,     'var(--txt-muted)'],
+    ['Provisioning',ct.vms_provisioning,'var(--warn)'],
+    ['Failed',      ct.vms_failed,      'var(--danger)'],
+  ].map(([lbl,cnt,color]) => `
+    <div style="margin-bottom:9px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+        <span style="color:var(--txt-secondary);">${lbl}</span>
+        <span style="color:${color};font-weight:700;">${cnt} <span style="color:var(--txt-muted);font-weight:400;">(${Math.round(cnt/total*100)}%)</span></span>
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%;"></div></div>
+    </div>`).join('');
+ 
+  // ── Trend Chart ──
   fetch('/api/v1/trends/cluster?hours=1').then(r => r.json()).then(t => {
     mkChart('chart-cluster-trend', t.labels,
       [sparkDataset('CPU %', t.cpu, '#3b82f6'),
@@ -2526,7 +2670,7 @@ function renderOverview(d) {
       { legend: true, yMin: 0, yMax: 100 });
   }).catch(() => {});
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: NODES
 // ═══════════════════════════════════════════════
@@ -2545,7 +2689,7 @@ function renderNodes(nodes) {
     </tr>`;
   }).join('');
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: VMs
 // ═══════════════════════════════════════════════
@@ -2586,7 +2730,7 @@ function filterVMs() {
 document.getElementById('vm-search').addEventListener('input', filterVMs);
 document.getElementById('vm-ns-filter').addEventListener('change', filterVMs);
 document.getElementById('vm-status-filter').addEventListener('change', filterVMs);
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: STORAGE
 // ═══════════════════════════════════════════════
@@ -2604,14 +2748,14 @@ function renderStorage(st) {
       <div class="pbar"><div class="pbar-fill ${pbarColor(usedPct)}" style="width:${usedPct}%"></div></div>
     </div>`;
   }).join('') || '<div style="color:var(--txt-muted);font-size:12px;">스토리지 풀 없음</div>';
-
+ 
   document.getElementById('tbody-pvs').innerHTML = st.pvs.map(p =>
     `<tr><td class="mono" style="font-size:11px;">${p.Name}</td><td>${p.Capacity}</td>
      <td><span class="badge ${p.Status==='Bound'?'badge-ok':'badge-warn'}">${p.Status}</span></td>
      <td style="font-size:10px;color:var(--txt-muted);">${p.StorageClass}</td>
      <td style="font-size:10px;color:var(--txt-muted);">${p.Claim}</td></tr>`
   ).join('');
-
+ 
   document.getElementById('tbody-pvcs').innerHTML = st.pvcs.map(p =>
     `<tr><td class="mono" style="font-size:11px;">${p.Name}</td>
      <td><span class="badge badge-off">${p.Namespace}</span></td>
@@ -2620,7 +2764,7 @@ function renderStorage(st) {
      <td style="font-size:10px;color:var(--txt-muted);">${p.StorageClass}</td></tr>`
   ).join('');
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: INFRA
 // ═══════════════════════════════════════════════
@@ -2656,7 +2800,7 @@ function renderInfra(infra) {
           <span style="font-size:12px;font-weight:700;color:${c};">${v}</span>
         </div>`).join('')}
     </div>`).join('');
-
+ 
   // Cluster Operators
   const ops = infra.cluster_operators || [];
   const ok = ops.filter(o => o.available && !o.degraded).length;
@@ -2679,7 +2823,7 @@ function renderInfra(infra) {
       <div class="op-ver" style="color:${c};">${op.version}</div>
     </div>`;
   }).join('');
-
+ 
   // MCP
   document.getElementById('mcp-grid').innerHTML = (infra.mcp_pools || []).map(p => {
     const ok = p.ready_count === p.machine_count && p.machine_count > 0;
@@ -2701,7 +2845,7 @@ function renderInfra(infra) {
     </div>`;
   }).join('') || '<div style="color:var(--txt-muted);font-size:12px;">MachineConfigPool 없음</div>';
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: PERFORMANCE
 // ═══════════════════════════════════════════════
@@ -2720,14 +2864,14 @@ function renderPerformance(d) {
   if (p.api_latency_p99 && p.api_latency_p99.length)
     mkChart('chart-api-lat', lbl, [sparkDataset('Latency p99 (ms)', p.api_latency_p99.map(v=>v*1000), '#a78bfa')]);
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER: COLLECTOR HEALTH
 // ═══════════════════════════════════════════════
 function renderCollector(d) {
   const ps = d.prometheus;
   const po = d.polling;
-
+ 
   // Prometheus status
   const stratColor = ps.strategy === 'raw' ? 'var(--success)' :
                      ps.strategy === 'route' ? 'var(--accent)' : 'var(--danger)';
@@ -2755,7 +2899,7 @@ function renderCollector(d) {
           <span class="mono" style="color:var(--accent2);">${v}</span>
         </div>`).join('') || '<span style="font-size:11px;color:var(--txt-muted);">없음</span>'}
     </div>`;
-
+ 
   // Ping latency history chart
   const pings = (d.prometheus_ping_history || []).slice().reverse();
   const maxLat = Math.max(...pings.map(p => p.latency_ms || 0), 100);
@@ -2764,7 +2908,7 @@ function renderCollector(d) {
     const c = !p.is_reachable ? 'var(--danger)' : p.latency_ms > 500 ? 'var(--warn)' : 'var(--success)';
     return `<div class="ping-tick" style="height:${h}px;background:${c};flex-shrink:0;width:10px;" title="${p.timestamp}: ${p.latency_ms?.toFixed(0)}ms (${p.is_reachable?'ok':'fail'})"></div>`;
   }).join('');
-
+ 
   // Polling KPIs
   document.getElementById('polling-kpis').innerHTML = [
     { label: 'Total Cycles', value: po.total_cycles, color: 'var(--txt-primary)' },
@@ -2776,7 +2920,7 @@ function renderCollector(d) {
     <div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;">${k.label}</div>
     <div style="font-size:18px;font-weight:700;color:${k.color};font-family:monospace;">${k.value}</div>
   </div>`).join('');
-
+ 
   // Cycle timeline
   const cycles = (po.recent_cycles || []).slice().reverse();
   document.getElementById('cycle-timeline').innerHTML = cycles.map(c => {
@@ -2786,7 +2930,7 @@ function renderCollector(d) {
     return `<div class="cycle-bar" style="height:${h}px;background:${color};"
       title="#${c.cycle_id} ${c.started_at} — ${c.status} (${Math.round(c.duration_ms||0)}ms)"></div>`;
   }).join('');
-
+ 
   // Metric stats table
   document.getElementById('tbody-metric-stats').innerHTML = (d.metric_summary || []).map(m => {
     const sc = m.success_rate >= 90 ? 'badge-ok' : m.success_rate >= 50 ? 'badge-warn' : 'badge-err';
@@ -2801,7 +2945,7 @@ function renderCollector(d) {
       <td style="color:${m.failed>0?'var(--danger)':'var(--txt-muted)'};">${m.failed}</td>
     </tr>`;
   }).join('');
-
+ 
   // DB stats
   const db = d.database || {};
   document.getElementById('db-stats-panel').innerHTML = `
@@ -2823,7 +2967,7 @@ function renderCollector(d) {
         </div>`).join('')}
     </div>`;
 }
-
+ 
 // ═══════════════════════════════════════════════
 // RENDER ALL
 // ═══════════════════════════════════════════════
@@ -2834,7 +2978,7 @@ function renderAll(d) {
   const ps = _engine_prom_reachable;
   document.getElementById('sb-prom-dot').className = `dot ${ps?'dot-ok':'dot-off'}`;
   document.getElementById('sb-updated').textContent = d.last_updated;
-
+ 
   renderOverview(d);
   renderNodes(d.nodes || []);
   renderVMs(d.vms || []);
@@ -2842,9 +2986,9 @@ function renderAll(d) {
   renderInfra(d.infra || {});
   if (state.currentPage === 'performance') renderPerformance(d);
 }
-
+ 
 let _engine_prom_reachable = false;
-
+ 
 // ═══════════════════════════════════════════════
 // AUTO-REFRESH + COUNTDOWN
 // ═══════════════════════════════════════════════
@@ -2862,7 +3006,7 @@ function startCountdown() {
   }, 1000);
 }
 const POLL_INTERVAL = 30;
-
+ 
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
@@ -2892,7 +3036,7 @@ init();
 </script>
 </body>
 </html>"""
-
+ 
 # ════════════════════════════════════════════════════════════════════
 # 9. ENTRYPOINT
 # ════════════════════════════════════════════════════════════════════
