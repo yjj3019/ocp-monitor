@@ -754,13 +754,7 @@ class MetricsCollector:
             nu: Dict[str, Dict[str, str]] = {}
             for line in top.split("\n"):
                 p = line.split()
-                if len(p) >= 5:
-                    try: cpu_pct_val = float(p[2].rstrip("%"))
-                    except Exception: cpu_pct_val = None
-                    try: mem_pct_val = float(p[4].rstrip("%"))
-                    except Exception: mem_pct_val = None
-                    nu[p[0]] = {"cpu": p[1], "mem": p[3],
-                                "cpu_pct": cpu_pct_val, "mem_pct": mem_pct_val}
+                if len(p) >= 5: nu[p[0]] = {"cpu": p[2], "mem": p[4]}
             nj = self._run(["oc", "get", "nodes", "-o", "json"])
             if not nj: return 0
             tc = 0
@@ -776,13 +770,10 @@ class MetricsCollector:
                 tc += cap_b
                 usage = nu.get(name, {"cpu": "N/A", "mem": "N/A"})
                 nodes.append(NodeMetrics(
-                    name=name, cpu_usage=usage.get("cpu","N/A"),
-                    memory_usage=usage.get("mem","N/A"),
+                    name=name, cpu_usage=usage["cpu"], memory_usage=usage["mem"],
                     status=status, roles=roles,
                     age=self._fmt_age(node["metadata"]["creationTimestamp"]),
                     memory_bytes=cap_b,
-                    cpu_pct_realtime=usage.get("cpu_pct"),
-                    memory_pct_realtime=usage.get("mem_pct"),
                 ))
             self.metrics.nodes = nodes
             self.metrics.global_memory_total = self._fmt_bytes(tc)
@@ -921,9 +912,9 @@ class MetricsCollector:
                 queries[key] = f'min(up{{job="{matched[cat]}"}}) by ()'
         queries.update({
             "leader": "min(etcd_server_has_leader) by ()",
-            "alerts": 'count(ALERTS{alertstate="firing",alertname!="Watchdog",alertname!~"InfoInhibitor.*"}) or vector(0)',
-            "cpu": 'clamp_min((1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)',
-            "mem": 'clamp_min((1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100, 0)',
+            "alerts": 'count(ALERTS{alertstate="firing"}) or vector(0)',
+            "cpu": '(1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100',
+            "mem": '(1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100',
         })
         with ThreadPoolExecutor(max_workers=max(len(queries), 1)) as ex:
             futs = {ex.submit(self._query, q): k for k, q in queries.items()}
@@ -1046,63 +1037,65 @@ class MetricsCollector:
         if not self.metrics.nodes or not self._prom_strategy: return 0
         test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
         has_node = bool(test and test[0].get("metric", {}).get("node"))
-
-        # node_network_* 는 node 레이블 없이 instance(IP) 만 있는 경우 대비
-        test_net = self._query('count by(node) (node_network_receive_bytes_total{device="eth0"})')
-        has_node_net = bool(test_net and test_net[0].get("metric", {}).get("node"))
-
         ip_map: Dict[str, str] = {}
-        if not has_node or not has_node_net:
+        if not has_node:
             for item in self._query("kube_node_info"):
                 lbl = item.get("metric", {})
                 if lbl.get("node") and lbl.get("internal_ip"):
                     ip_map[lbl["internal_ip"]] = lbl["node"]
-            logger.info("노드 IP 매핑: %d개", len(ip_map))
-
-        # 네트워크 필터: lo, veth, ovn, br, cali 제외
-        NET_EXCL = "lo|veth.*|ovn.*|br-.*|cali.*|tunl.*|flannel.*"
-        queries: Dict[str, str] = {
-            "cpu": 'clamp_min((1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)',
-            "mem": 'clamp_min((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100, 0)',
-            "net_rx": f'sum by(node,instance) (rate(node_network_receive_bytes_total{{device!~"{NET_EXCL}"}}[5m]))',
-            "net_tx": f'sum by(node,instance) (rate(node_network_transmit_bytes_total{{device!~"{NET_EXCL}"}}[5m]))',
-        }
         nrt: Dict[str, Dict[str, float]] = {}
-        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
-            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = {
+                ex.submit(self._query, '(1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'): "cpu",
+                ex.submit(self._query, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'): "mem",
+            }
             for fut in as_completed(futs):
                 k = futs[fut]
                 for item in fut.result():
                     lbl = item.get("metric", {})
-                    name = (lbl.get("node", "")
-                            or ip_map.get(lbl.get("instance", "").split(":")[0], ""))
+                    name = lbl.get("node", "") or ip_map.get(lbl.get("instance", "").split(":")[0], "")
                     if not name: continue
-                    try:
-                        val = float(item["value"][1])
-                        import math
-                        if math.isnan(val) or math.isinf(val): continue
-                        # 같은 노드에서 여러 device 합산 (net_rx/tx)
-                        if k in ("net_rx", "net_tx"):
-                            nrt.setdefault(name, {})[k] = nrt.get(name, {}).get(k, 0) + val
-                        else:
-                            nrt.setdefault(name, {})[k] = val
+                    try: nrt.setdefault(name, {})[k] = float(item["value"][1])
                     except Exception: pass
-
         for n in self.metrics.nodes:
             d = nrt.get(n.name, {})
-            # Prometheus 값 우선, 없으면 oc top 값 유지
-            if d.get("cpu") is not None:
-                n.cpu_pct_realtime = d["cpu"]
-            if d.get("mem") is not None:
-                n.memory_pct_realtime = d["mem"]
-            if hasattr(n, "net_rx_bps"): n.net_rx_bps = d.get("net_rx")
-            if hasattr(n, "net_tx_bps"): n.net_tx_bps = d.get("net_tx")
-
-        logger.info("노드 실시간: %d개 수집 (net: %s)",
-                    len(nrt),
-                    "있음" if any("net_rx" in v for v in nrt.values()) else "없음")
+            n.cpu_pct_realtime = d.get("cpu")
+            n.memory_pct_realtime = d.get("mem")
         return len(nrt)
 
+
+    def _fetch_from_oc_top(self) -> dict:
+        """oc adm top nodes fallback"""
+        try:
+            result = subprocess.run(
+                ["oc", "adm", "top", "nodes", "--no-headers"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                logger.error(f"oc adm top nodes 실패: {result.stderr.strip()}")
+                return {}
+
+            data = {}
+            for line in result.stdout.strip().splitlines():
+                parts = re.split(r"\s+", line.strip())
+                if len(parts) >= 5:
+                    name = parts[0]
+                    try:
+                        cpu_str = parts[1].replace("m", "")
+                        cpu = float(cpu_str) / 10.0
+                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
+                        mem = float(mem_str)
+                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
+                    except Exception:
+                        continue
+            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
+            return data
+        except FileNotFoundError:
+            logger.error("oc 명령어를 찾을 수 없습니다.")
+            return {}
+        except Exception as e:
+            logger.error(f"oc adm top nodes 실행 중 예외: {e}")
+            return {}
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
         queries = {
@@ -1113,6 +1106,28 @@ class MetricsCollector:
             "net_tx": "rate(kubevirt_vmi_network_transmit_bytes_total[5m])",
             "disk_r": "rate(kubevirt_vmi_storage_read_traffic_bytes_total[5m])",
             "disk_w": "rate(kubevirt_vmi_storage_write_traffic_bytes_total[5m])",
+
+            data = {}
+            for line in result.stdout.strip().splitlines():
+                parts = re.split(r"\s+", line.strip())
+                if len(parts) >= 5:
+                    name = parts[0]
+                    try:
+                        cpu_str = parts[1].replace("m", "")
+                        cpu = float(cpu_str) / 10.0
+                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
+                        mem = float(mem_str)
+                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
+                    except Exception:
+                        continue
+            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
+            return data
+        except FileNotFoundError:
+            logger.error("oc 명령어를 찾을 수 없습니다. OpenShift CLI가 설치되어 있는지 확인하세요.")
+            return {}
+        except Exception as e:
+            logger.error(f"oc adm top nodes 실행 중 예외 발생: {e}")
+            return {}
         }
         rt: Dict[Tuple[str, str], Dict[str, float]] = {}
         with ThreadPoolExecutor(max_workers=len(queries)) as ex:
@@ -1181,7 +1196,6 @@ class MetricsCollector:
             ("node_realtime", self.fetch_node_realtime),
             ("vm_realtime", self.fetch_vm_realtime),
             ("perf_trends", self.fetch_perf_trends),
-            ("pvc_disk_stats", self.fetch_pvc_disk_stats),
         ]
         results = []
         for name, fn in steps:
@@ -1195,139 +1209,6 @@ class MetricsCollector:
             elif vm.status_group == "stopped": m.vm_stopped_count += 1
             elif vm.status_group == "failed": m.vm_failed_count += 1
         return results
-
-    def fetch_pvc_disk_stats(self) -> int:
-        """VM별 PVC 실제 디스크 사용량 수집 (kubelet_volume_stats)"""
-        if not self._prom_strategy: return 0
-        queries = {
-            "used":     "kubelet_volume_stats_used_bytes",
-            "capacity": "kubelet_volume_stats_capacity_bytes",
-        }
-        ps: Dict[str, Dict[str, int]] = {}
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
-            for fut in as_completed(futs):
-                k = futs[fut]
-                for item in fut.result():
-                    lbl = item.get("metric", {})
-                    pvc = lbl.get("persistentvolumeclaim", "")
-                    ns  = lbl.get("namespace", "")
-                    if not pvc: continue
-                    key = f"{ns}/{pvc}"
-                    try: ps.setdefault(key, {})[k] = int(float(item["value"][1]))
-                    except Exception: pass
-        self.metrics.pvc_disk_stats = ps
-        # VM별 총 디스크 사용량 계산
-        for vm in self.metrics.vms:
-            total_used = 0
-            for vol in vm.volumes:
-                pvc = vol.get("pvc", "")
-                if pvc and pvc != "N/A":
-                    key = f"{vm.namespace}/{pvc}"
-                    total_used += ps.get(key, {}).get("used", 0)
-            vm.memory_used_bytes = vm.memory_used_bytes  # 기존 유지
-            # disk_used_bytes를 net_rx_bps 재사용 대신 별도 필드로 저장
-            # volumes[0]에 disk_used 주입
-            for vol in vm.volumes:
-                pvc = vol.get("pvc", "")
-                if pvc and pvc != "N/A":
-                    key = f"{vm.namespace}/{pvc}"
-                    vol["used_bytes"] = ps.get(key, {}).get("used", 0)
-                    vol["capacity_bytes"] = ps.get(key, {}).get("capacity", 0)
-            vm._disk_used_bytes = total_used  # type: ignore[attr-defined]
-        return len(ps)
-
-
-    def query_node_trends(self, node_name: str, hours: int = 1) -> Dict[str, Any]:
-        """노드별 on-demand 시계열 (CPU/Mem/Net/Disk)"""
-        if not self._prom_strategy:
-            return {}
-        end_ts = int(time.time())
-        start_ts = end_ts - hours * 3600
-        step = "2m" if hours <= 1 else "5m"
-        n = node_name.replace('"', '')
-
-        queries = {
-            "cpu":    f'clamp_min((1 - avg by(node) (rate(node_cpu_seconds_total{{mode="idle",node="{n}"}}[5m]))) * 100, 0)',
-            "mem":    f'clamp_min((1 - node_memory_MemAvailable_bytes{{node="{n}"}} / node_memory_MemTotal_bytes{{node="{n}"}}) * 100, 0)',
-            "net_rx": f'sum by(node) (rate(node_network_receive_bytes_total{{node="{n}",device!~"lo|veth.*|ovn.*|br.*"}}[5m]))',
-            "net_tx": f'sum by(node) (rate(node_network_transmit_bytes_total{{node="{n}",device!~"lo|veth.*|ovn.*|br.*"}}[5m]))',
-            "disk_r": f'sum by(node) (rate(node_disk_read_bytes_total{{node="{n}"}}[5m]))',
-            "disk_w": f'sum by(node) (rate(node_disk_written_bytes_total{{node="{n}"}}[5m]))',
-        }
-        result: Dict[str, Any] = {"labels": []}
-        import urllib.parse as _up
-        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
-            futs = {ex.submit(self._query_range, q): k for k, q in queries.items()}
-            for fut in as_completed(futs):
-                k = futs[fut]
-                vals, lbls = fut.result()
-                import math
-                vals = [None if (v is None or math.isnan(v) or math.isinf(v)) else v for v in vals]
-                result[k] = vals
-                if lbls and not result["labels"]:
-                    result["labels"] = lbls
-        return result
-
-    def query_vm_trends(self, vm_name: str, namespace: str, hours: int = 1) -> Dict[str, Any]:
-        """VM별 on-demand 시계열 (CPU/Mem/Net/Disk)"""
-        if not self._prom_strategy:
-            return {}
-        n = vm_name.replace('"', '')
-        ns = namespace.replace('"', '')
-
-        queries = {
-            "cpu":    f'rate(kubevirt_vmi_cpu_usage_seconds_total{{name="{n}",namespace="{ns}"}}[5m]) * 100',
-            "mem_pct":f'clamp_min(kubevirt_vmi_memory_used_bytes{{name="{n}",namespace="{ns}"}} / kubevirt_vmi_memory_available_bytes{{name="{n}",namespace="{ns}"}} * 100, 0)',
-            "net_rx": f'rate(kubevirt_vmi_network_receive_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
-            "net_tx": f'rate(kubevirt_vmi_network_transmit_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
-            "disk_r": f'rate(kubevirt_vmi_storage_read_traffic_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
-            "disk_w": f'rate(kubevirt_vmi_storage_write_traffic_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
-        }
-        result: Dict[str, Any] = {"labels": []}
-        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
-            futs = {ex.submit(self._query_range, q): k for k, q in queries.items()}
-            for fut in as_completed(futs):
-                k = futs[fut]
-                vals, lbls = fut.result()
-                import math
-                vals = [None if (v is None or math.isnan(v) or math.isinf(v)) else v for v in vals]
-                result[k] = vals
-                if lbls and not result["labels"]:
-                    result["labels"] = lbls
-        return result
-
-    def query_node_conditions(self) -> List[Dict]:
-        """kube_node_status_condition 기반 노드별 상세 상태"""
-        conditions = ["Ready", "MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"]
-        result: Dict[str, Dict] = {}
-        with ThreadPoolExecutor(max_workers=len(conditions)) as ex:
-            futs = {
-                ex.submit(self._query,
-                    f'kube_node_status_condition{{condition="{c}",status="true"}}'): c
-                for c in conditions
-            }
-            for fut in as_completed(futs):
-                cond = futs[fut]
-                for item in fut.result():
-                    node = item.get("metric", {}).get("node", "")
-                    if not node: continue
-                    try:
-                        val = float(item["value"][1])
-                    except Exception:
-                        val = 0
-                    result.setdefault(node, {})[cond] = val
-        return [
-            {
-                "node": node,
-                "ready":               int(conds.get("Ready", 0)),
-                "memory_pressure":     int(conds.get("MemoryPressure", 0)),
-                "disk_pressure":       int(conds.get("DiskPressure", 0)),
-                "pid_pressure":        int(conds.get("PIDPressure", 0)),
-                "network_unavailable": int(conds.get("NetworkUnavailable", 0)),
-            }
-            for node, conds in sorted(result.items())
-        ]
 
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """FastAPI가 소비할 JSON-직렬화 가능 스냅샷 반환"""
@@ -1364,7 +1245,6 @@ class MetricsCollector:
                     "cpu_usage": n.cpu_usage, "mem_usage": n.memory_usage,
                     "cpu_pct": n.cpu_pct_realtime, "mem_pct": n.memory_pct_realtime,
                     "memory_bytes": n.memory_bytes,
-                    "net_rx_bps": getattr(n,"net_rx_bps",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
                 }
                 for n in m.nodes
             ],
@@ -1377,7 +1257,6 @@ class MetricsCollector:
                     "cpu_pct": vm.cpu_usage_pct, "mem_pct": vm.memory_usage_pct,
                     "net_rx_bps": vm.net_rx_bps, "net_tx_bps": vm.net_tx_bps,
                     "disk_r_bps": vm.disk_read_bps, "disk_w_bps": vm.disk_write_bps,
-                    "disk_used_bytes": getattr(vm, "_disk_used_bytes", 0),
                     "volumes": vm.volumes,
                 }
                 for vm in m.vms
@@ -1463,13 +1342,9 @@ class PollingEngine:
                 elif vm.status_group == "provisioning": m.vm_provisioning_count += 1
                 elif vm.status_group == "failed": m.vm_failed_count += 1
             with self._cache_lock:
-                self._cache = _sanitize_json(self.collector.get_metrics_snapshot())
+                self._cache = self.collector.get_metrics_snapshot()
             self._update_prom_status(*self.collector.ping_prometheus())
             logger.info("초기 수집 완료 — nodes=%d vms=%d", len(m.nodes), len(m.vms))
-            try:
-                HTMLReportBuilder().build(m, REPORT_HTML)
-            except Exception as e:
-                logger.warning("초기 HTML 리포트 생성 실패: %s", e)
         except Exception as e:
             logger.error("초기 수집 실패: %s", e)
 
@@ -1504,13 +1379,7 @@ class PollingEngine:
 
             # 캐시 갱신
             with self._cache_lock:
-                self._cache = _sanitize_json(self.collector.get_metrics_snapshot())
-
-            # HTML 리포트 생성 (Full Report 탭용)
-            try:
-                HTMLReportBuilder().build(self.collector.metrics, REPORT_HTML)
-            except Exception as e:
-                logger.warning("HTML 리포트 생성 실패: %s", e)
+                self._cache = self.collector.get_metrics_snapshot()
 
             logger.info("--- Polling cycle #%d 완료 (%.0fms, %s) ---", cycle_id, duration_ms, status)
 
@@ -1531,445 +1400,9 @@ class PollingEngine:
         with self._cache_lock:
             return dict(self._cache)
 
-
-# ════════════════════════════════════════════════════════════════════
-# 6b. HTML REPORT BUILDER  (vm_metrics_report.py 기능 통합)
-# ════════════════════════════════════════════════════════════════════
-class HTMLReportBuilder:
-    """
-    수집된 SystemMetrics를 받아 vm_metrics_report.py 스타일의
-    정적 HTML 리포트를 생성한다.
-    """
-
-    @staticmethod
-    def _fmt_bytes(b: int) -> str:
-        if b == 0: return "0 B"
-        names = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
-        v, i = float(b), 0
-        while v >= 1024 and i < len(names) - 1: v /= 1024.0; i += 1
-        return f"{v:.2f} {names[i]}"
-
-    @staticmethod
-    def _fmt_pct(v) -> str:
-        return f"{v:.1f}%" if v is not None else "N/A"
-
-    @staticmethod
-    def _pct_color(v) -> str:
-        if v is None: return "#64748b"
-        if v < 70: return "#10b981"
-        if v < 90: return "#f59e0b"
-        return "#ef4444"
-
-    @staticmethod
-    def _pct_bar(v, label="") -> str:
-        c = HTMLReportBuilder._pct_color(v)
-        w = f"{min(v,100):.1f}" if v is not None else "0"
-        txt = HTMLReportBuilder._fmt_pct(v)
-        return (f"<div style='margin-bottom:6px'>"
-                f"<div style='display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-bottom:2px'>"
-                f"<span>{escape(label)}</span><span style='color:{c};font-weight:700'>{txt}</span></div>"
-                f"<div style='background:#1e293b;border-radius:3px;height:5px;overflow:hidden'>"
-                f"<div style='background:{c};height:5px;border-radius:3px;width:{w}%'></div></div></div>")
-
-    @staticmethod
-    def _status_badge(sg: str) -> str:
-        m = {"running": ("#10b981","Running"), "stopped": ("#64748b","Stopped"),
-             "provisioning": ("#f59e0b","Provisioning"), "failed": ("#ef4444","Failed"),
-             "unknown": ("#475569","Unknown")}
-        c, t = m.get(sg, ("#475569","Unknown"))
-        return (f"<span style='background:{c}22;color:{c};border:1px solid {c}55;"
-                f"padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700'>{t}</span>")
-
-    def build(self, m: SystemMetrics, report_file: str = REPORT_HTML) -> None:
-        h = m.cluster_health
-        im = m.infra
-
-        # ── 클러스터 오퍼레이터 요약 ──────────────────────────────
-        ok_ops  = sum(1 for o in im.cluster_operators if o.available and not o.degraded)
-        deg_ops = sum(1 for o in im.cluster_operators if o.degraded)
-        prog_ops= sum(1 for o in im.cluster_operators if o.progressing and not o.degraded)
-
-        op_cells = ""
-        for op in sorted(im.cluster_operators,
-                         key=lambda o: (not o.degraded, not o.progressing, o.name)):
-            if op.degraded:      c, dot = "#ef4444", "#ef4444"
-            elif op.progressing: c, dot = "#f59e0b", "#f59e0b"
-            elif op.available:   c, dot = "#10b981", "#10b981"
-            else:                c, dot = "#64748b", "#64748b"
-            tip = escape(op.message[:120]) if op.message else ""
-            op_cells += (
-                f"<div title='{tip}' style='background:#1e293b;border:1px solid #1e3a5f;border-radius:6px;"
-                f"padding:7px 9px;'>"
-                f"<div style='display:flex;align-items:center;gap:5px;margin-bottom:2px'>"
-                f"<div style='width:7px;height:7px;border-radius:50%;background:{dot};flex-shrink:0'></div>"
-                f"<span style='font-size:11px;font-weight:600;color:#e2e8f0;white-space:nowrap;"
-                f"overflow:hidden;text-overflow:ellipsis'>{escape(op.name)}</span></div>"
-                f"<div style='font-size:10px;color:{c};padding-left:12px;font-family:monospace'>{escape(op.version)}</div>"
-                f"</div>"
-            )
-
-        # ── 노드 행 ─────────────────────────────────────────────
-        node_rows = ""
-        for n in m.nodes:
-            sc = "#10b981" if n.status == "Ready" else "#ef4444"
-            node_rows += (
-                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(n.name)}</td>"
-                f"<td><span style='background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:3px;"
-                f"font-size:10px'>{escape(n.roles)}</span></td>"
-                f"<td><span style='color:{sc}'>{escape(n.status)}</span></td>"
-                f"<td>{escape(n.age)}</td>"
-                f"<td style='font-family:monospace'>{escape(n.cpu_usage)}</td>"
-                f"<td>{self._pct_bar(n.cpu_pct_realtime)}</td>"
-                f"<td style='font-family:monospace'>{escape(n.memory_usage)}</td>"
-                f"<td>{self._pct_bar(n.memory_pct_realtime)}</td></tr>"
-            )
-
-        # ── VM 행 ────────────────────────────────────────────────
-        vm_rows = ""
-        prev_ns = None
-        for vm in sorted(m.vms, key=lambda v: (v.namespace, v.name)):
-            if vm.namespace != prev_ns:
-                prev_ns = vm.namespace
-                vm_rows += (
-                    f"<tr><td colspan='12' style='background:#0f172a;color:#7dd3fc;"
-                    f"font-size:11px;font-weight:700;padding:6px 10px;border-top:2px solid #1e3a5f'>"
-                    f"📁 {escape(vm.namespace)}</td></tr>"
-                )
-            net_rx = f"{vm.net_rx_bps/1024:.1f} KB/s" if vm.net_rx_bps else "—"
-            net_tx = f"{vm.net_tx_bps/1024:.1f} KB/s" if vm.net_tx_bps else "—"
-            vm_rows += (
-                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(vm.name)}</td>"
-                f"<td>{self._status_badge(vm.status_group)}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{escape(vm.node)}</td>"
-                f"<td style='font-size:11px'>{escape(vm.ip_address)}</td>"
-                f"<td style='text-align:center'>{escape(vm.cpu_cores)}</td>"
-                f"<td>{self._pct_bar(vm.cpu_usage_pct)}</td>"
-                f"<td style='font-size:11px'>{escape(vm.memory_total)}</td>"
-                f"<td>{self._pct_bar(vm.memory_usage_pct)}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{net_rx}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{net_tx}</td>"
-                f"<td style='font-size:11px;color:#64748b'>{escape(vm.os_info[:30])}</td>"
-                f"<td style='font-size:11px'>{escape(vm.creation_time)}</td></tr>"
-            )
-
-        # ── 스토리지 풀 행 ───────────────────────────────────────
-        pool_rows = ""
-        for p in m.storage_pools.values():
-            used_pct = p.used_capacity_bytes / p.total_capacity_bytes * 100 if p.total_capacity_bytes else 0
-            pool_rows += (
-                f"<tr><td style='color:#67e8f9'>{escape(p.name)}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{escape(p.provisioner)}</td>"
-                f"<td style='text-align:center'>{p.pv_count}</td>"
-                f"<td style='text-align:center'>{p.pvc_count}</td>"
-                f"<td>{self._fmt_bytes(p.total_capacity_bytes)}</td>"
-                f"<td>{self._fmt_bytes(p.used_capacity_bytes)}</td>"
-                f"<td>{self._pct_bar(used_pct)}</td></tr>"
-            )
-
-        # ── 인프라 서비스 카드 ───────────────────────────────────
-        def svc_card(title, color, items):
-            rows = "".join(
-                f"<div style='display:flex;justify-content:space-between;padding:5px 0;"
-                f"border-bottom:1px solid #1e293b'>"
-                f"<span style='font-size:11px;color:#64748b'>{l}</span>"
-                f"<span style='font-size:12px;font-weight:700;color:{vc}'>{v}</span></div>"
-                for l, v, vc in items
-            )
-            return (
-                f"<div style='background:#111827;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden'>"
-                f"<div style='background:{color}11;padding:8px 12px;border-bottom:1px solid {color}33'>"
-                f"<span style='font-size:11px;font-weight:700;color:#e2e8f0;letter-spacing:.05em'>{title}</span></div>"
-                f"<div style='padding:8px 12px'>{rows}</div></div>"
-            )
-
-        svc_cards = svc_card("INGRESS ROUTER", "#06b6d4", [
-            ("Req/s",    f"{im.router_req_rate:.1f}/s" if im.router_req_rate is not None else "N/A", "#06b6d4"),
-            ("4xx/s",    f"{im.router_4xx_rate:.2f}/s" if im.router_4xx_rate is not None else "N/A", "#f59e0b"),
-            ("5xx/s",    f"{im.router_5xx_rate:.2f}/s" if im.router_5xx_rate is not None else "N/A", "#ef4444"),
-            ("Sessions", str(int(im.router_sessions)) if im.router_sessions is not None else "N/A", "#3b82f6"),
-        ])
-
-        sc_pend = im.sched_pending
-        sc_c    = "#ef4444" if sc_pend and sc_pend > 10 else "#10b981"
-        svc_cards += svc_card("SCHEDULER", "#a78bfa", [
-            ("Pending Pods", str(int(sc_pend)) if sc_pend is not None else "N/A", sc_c),
-        ])
-        ovn_ok = im.ovn_nb_leader is not None and im.ovn_nb_leader >= 1
-        svc_cards += svc_card("OVN-KUBERNETES", "#2dd4bf", [
-            ("Logical Ports", str(int(im.ovn_ports)) if im.ovn_ports is not None else "N/A", "#2dd4bf"),
-            ("NB DB Leader",  "Leader" if ovn_ok else "N/A", "#10b981" if ovn_ok else "#64748b"),
-        ])
-        svc_cards += svc_card("IMAGE REGISTRY", "#34d399", [
-            ("Req/s", f"{im.reg_req_rate:.2f}/s" if im.reg_req_rate is not None else "N/A", "#34d399"),
-        ])
-
-        # ── MCP 카드 ─────────────────────────────────────────────
-        mcp_html = ""
-        for p in im.mcp_pools:
-            dg = p.degraded_count > 0
-            ok_all = p.ready_count == p.machine_count and p.machine_count > 0
-            bc = "#ef4444" if dg else ("#10b981" if ok_all else "#f59e0b")
-            dg_color = "#ef4444" if dg else "#64748b"
-            st = "Degraded" if dg else ("Ready" if ok_all else "Updating")
-            mcp_html += (
-                f"<div style='background:#111827;border:1px solid {bc}33;border-radius:8px;padding:12px'>"
-                f"<div style='display:flex;justify-content:space-between;margin-bottom:8px'>"
-                f"<span style='font-weight:700;color:#e2e8f0'>{escape(p.name)}</span>"
-                f"<span style='font-size:11px;font-weight:700;color:{bc}'>{st}</span></div>"
-                f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:4px'>"
-                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
-                f"<div style='font-size:9px;color:#64748b'>Total</div><div style='font-weight:700'>{p.machine_count}</div></div>"
-                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
-                f"<div style='font-size:9px;color:#64748b'>Ready</div><div style='font-weight:700;color:#10b981'>{p.ready_count}</div></div>"
-                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
-                f"<div style='font-size:9px;color:#64748b'>Updated</div><div style='font-weight:700;color:#06b6d4'>{p.updated_count}</div></div>"
-                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
-                f"<div style='font-size:9px;color:#64748b'>Degraded</div>"
-                f"<div style='font-weight:700;color:{dg_color}'>{p.degraded_count}</div></div>"
-                f"</div></div>"
-            )
-
-        # ── 헬스 카드 ────────────────────────────────────────────
-        def hcard(label, v):
-            ok = v is not None and v >= 1
-            c  = "#10b981" if ok else ("#64748b" if v is None else "#ef4444")
-            t  = "Healthy" if ok else ("N/A" if v is None else "Unhealthy")
-            return (f"<div style='background:#111827;border:1px solid {c}33;border-radius:8px;"
-                    f"padding:12px;display:flex;align-items:center;gap:10px'>"
-                    f"<div style='width:10px;height:10px;border-radius:50%;background:{c};flex-shrink:0'></div>"
-                    f"<div><div style='font-size:10px;color:#64748b;margin-bottom:2px'>{label}</div>"
-                    f"<div style='font-weight:700;color:{c}'>{t}</div></div></div>")
-
-        # ── HTML 조립 ─────────────────────────────────────────────
-        fail_c  = "#ef4444" if sum(1 for v in m.vms if v.status_group == "failed") else "#64748b"
-        alert_c = "#ef4444" if h.firing_alerts else "#10b981"
-        vm_run = sum(1 for v in m.vms if v.status_group == "running")
-        vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
-        vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
-        vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
-
-        tbl_style = "width:100%;border-collapse:collapse;font-size:12px"
-        th_style  = "padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap"
-        td_style  = "padding:7px 10px;border-bottom:1px solid #0f172a"
-
-        # ── HTML 템플릿 (f-string 대신 변수 치환 — Python 3.11 호환) ──────
-        TMPL = """<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>AIBox Infrastructure Report &mdash; __LAST_UPDATED__</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#020817;color:#e2e8f0;font-family:"Segoe UI",sans-serif;padding:24px}
-h1{font-size:20px;font-weight:700;color:#fff;margin-bottom:4px}
-h2{font-size:13px;font-weight:700;color:#e2e8f0;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-h2::before{content:"";display:inline-block;width:3px;height:14px;background:#3b82f6;border-radius:2px}
-.sec{background:#0c1426;border:1px solid rgba(30,58,95,.13);border-radius:10px;padding:20px;margin-bottom:20px}
-table{width:100%;border-collapse:collapse;font-size:12px}
-th{padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap}
-td{padding:7px 10px;border-bottom:1px solid #0f172a}
-tr:hover td{background:rgba(59,130,246,.04)}
-.grid{display:grid;gap:12px}
-.kpi{background:#111827;border:1px solid #1e3a5f;border-radius:8px;padding:14px}
-.kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#475569;margin-bottom:4px}
-.kpi .v{font-size:22px;font-weight:700;font-family:monospace}
-details summary{cursor:pointer;font-size:12px;color:#7dd3fc;margin-bottom:8px}
-</style>
-</head>
-<body>
-<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1e3a5f">
-  <h1>&#11042; AIBox Infrastructure Report</h1>
-  <p style="color:#64748b;font-size:12px">OCP __OCP_VER__ &nbsp;&middot;&nbsp; __LAST_UPDATED__ &nbsp;&middot;&nbsp; 30s auto-refresh</p>
-</div>
-
-<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:20px">
-  <div class="kpi"><div class="l">Nodes</div><div class="v">__NODES__</div></div>
-  <div class="kpi"><div class="l">VMs Total</div><div class="v">__VMS__</div></div>
-  <div class="kpi"><div class="l" style="color:#10b981">Running</div><div class="v" style="color:#10b981">__VM_RUN__</div></div>
-  <div class="kpi"><div class="l" style="color:#64748b">Stopped</div><div class="v" style="color:#64748b">__VM_STP__</div></div>
-  <div class="kpi"><div class="l" style="color:#f59e0b">Provisioning</div><div class="v" style="color:#f59e0b">__VM_PRV__</div></div>
-  <div class="kpi"><div class="l" style="color:__FAIL_C__">Failed</div><div class="v" style="color:__FAIL_C__">__VM_FAI__</div></div>
-  <div class="kpi"><div class="l">Cluster CPU</div><div class="v" style="color:__CPU_C__">__CPU__</div></div>
-  <div class="kpi"><div class="l">Cluster Mem</div><div class="v" style="color:__MEM_C__">__MEM__</div></div>
-  <div class="kpi"><div class="l" style="color:__ALERT_C__">Firing Alerts</div><div class="v" style="color:__ALERT_C__">__ALERTS__</div></div>
-</div>
-
-<div class="sec">
-  <h2>Cluster Health</h2>
-  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-    __HEALTH_CARDS__
-  </div>
-</div>
-
-<div class="sec">
-  <h2>Infrastructure Services</h2>
-  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
-    __SVC_CARDS__
-  </div>
-</div>
-
-<div class="sec">
-  <h2>Cluster Operators &nbsp;
-    <span style="font-size:11px;font-weight:400;color:#10b981">__OK_OPS__ OK</span>
-    __DEG_BADGE____PROG_BADGE__
-  </h2>
-  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">
-    __OP_CELLS__
-  </div>
-</div>
-
-<div class="sec">
-  <h2>MachineConfigPool</h2>
-  <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
-    __MCP_HTML__
-  </div>
-</div>
-
-<div class="sec">
-  <h2>Nodes (__NODE_COUNT__)</h2>
-  <div style="overflow-x:auto">
-    <table>
-      <thead><tr>
-        <th>Name</th><th>Roles</th><th>Status</th><th>Age</th>
-        <th>CPU (top)</th><th>CPU %</th><th>Memory (top)</th><th>Memory %</th>
-      </tr></thead>
-      <tbody>__NODE_ROWS__</tbody>
-    </table>
-  </div>
-</div>
-
-<div class="sec">
-  <h2>Virtual Machines (__VM_COUNT__)</h2>
-  <div style="overflow-x:auto">
-    <table>
-      <thead><tr>
-        <th>Name</th><th>Status</th><th>Node</th><th>IP</th>
-        <th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
-        <th>Net RX</th><th>Net TX</th><th>OS</th><th>Age</th>
-      </tr></thead>
-      <tbody>__VM_ROWS__</tbody>
-    </table>
-  </div>
-</div>
-
-<div class="sec">
-  <h2>Storage Pools (PV: __PV_COUNT__, PVC: __PVC_COUNT__)</h2>
-  <div style="overflow-x:auto;margin-bottom:16px">
-    <table>
-      <thead><tr>
-        <th>Pool Name</th><th>Provisioner</th><th>PVs</th><th>PVCs</th>
-        <th>Total</th><th>Used</th><th>Usage %</th>
-      </tr></thead>
-      <tbody>__POOL_ROWS__</tbody>
-    </table>
-  </div>
-  <details>
-    <summary>PersistentVolumes (__PV_COUNT__&#xAC1C;) &#xD3BC;&#xCE58;&#xAE30;</summary>
-    <div style="overflow-x:auto;margin-top:8px">
-      <table>
-        <thead><tr><th>Name</th><th>Capacity</th><th>Status</th><th>StorageClass</th><th>Claim</th><th>Age</th></tr></thead>
-        <tbody>__PV_ROWS__</tbody>
-      </table>
-    </div>
-  </details>
-</div>
-
-<div style="text-align:center;color:#334155;font-size:11px;margin-top:16px">
-  AIBox Unified Monitoring Portal v5 &nbsp;&middot;&nbsp; __LAST_UPDATED__
-</div>
-</body></html>"""
-
-        # ── pv_rows_html 생성 ───────────────────────────────────
-        pv_rows_html = ""
-        for pv in m.pv_data:
-            pv_n   = escape(pv.get("Name",""))
-            pv_cap = escape(pv.get("Capacity",""))
-            pv_st  = escape(pv.get("Status",""))
-            pv_scn = escape(pv.get("StorageClass",""))
-            pv_cl  = escape(pv.get("Claim",""))
-            pv_ag  = escape(pv.get("Age",""))
-            pv_c   = "#10b981" if pv.get("Status") == "Bound" else "#f59e0b"
-            pv_rows_html += (
-                "<tr>"
-                f"<td style='font-family:monospace;font-size:11px'>{pv_n}</td>"
-                f"<td>{pv_cap}</td>"
-                f"<td><span style='color:{pv_c}'>{pv_st}</span></td>"
-                f"<td style='font-size:11px;color:#64748b'>{pv_scn}</td>"
-                f"<td style='font-size:11px;color:#94a3b8'>{pv_cl}</td>"
-                f"<td style='font-size:11px'>{pv_ag}</td>"
-                "</tr>"
-            )
-
-        # ── 치환값 계산 ──────────────────────────────────────────
-        vm_run = sum(1 for v in m.vms if v.status_group == "running")
-        vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
-        vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
-        vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
-        fail_c  = "#ef4444" if vm_fai  else "#64748b"
-        alert_c = "#ef4444" if h.firing_alerts else "#10b981"
-
-        replacements = {
-            "__LAST_UPDATED__": escape(m.last_updated),
-            "__OCP_VER__":      escape(m.ocp_version),
-            "__NODES__":        str(len(m.nodes)),
-            "__VMS__":          str(len(m.vms)),
-            "__VM_RUN__":       str(vm_run),
-            "__VM_STP__":       str(vm_stp),
-            "__VM_PRV__":       str(vm_prv),
-            "__VM_FAI__":       str(vm_fai),
-            "__FAIL_C__":       fail_c,
-            "__ALERT_C__":      alert_c,
-            "__CPU_C__":        self._pct_color(h.cluster_cpu_pct),
-            "__MEM_C__":        self._pct_color(h.cluster_memory_pct),
-            "__CPU__":          self._fmt_pct(h.cluster_cpu_pct),
-            "__MEM__":          self._fmt_pct(h.cluster_memory_pct),
-            "__ALERTS__":       str(h.firing_alerts),
-            "__HEALTH_CARDS__": (
-                hcard("API Server", h.api_server) +
-                hcard("ETCD",       h.etcd) +
-                hcard("CoreDNS",    h.coredns) +
-                hcard("ETCD Leader",h.etcd_leader)
-            ),
-            "__SVC_CARDS__":    svc_cards,
-            "__OK_OPS__":       str(ok_ops),
-            "__DEG_BADGE__":    (f"<span style='font-size:11px;font-weight:700;color:#ef4444'>&nbsp;{deg_ops} Degraded</span>" if deg_ops else ""),
-            "__PROG_BADGE__":   (f"<span style='font-size:11px;font-weight:700;color:#f59e0b'>&nbsp;{prog_ops} Progressing</span>" if prog_ops else ""),
-            "__OP_CELLS__":     op_cells,
-            "__MCP_HTML__":     mcp_html or "<p style='color:#64748b;font-size:12px'>No data</p>",
-            "__NODE_COUNT__":   str(len(m.nodes)),
-            "__NODE_ROWS__":    node_rows,
-            "__VM_COUNT__":     str(len(m.vms)),
-            "__VM_ROWS__":      vm_rows,
-            "__PV_COUNT__":     str(len(m.pv_data)),
-            "__PVC_COUNT__":    str(len(m.pvc_data)),
-            "__POOL_ROWS__":    pool_rows,
-            "__PV_ROWS__":      pv_rows_html,
-        }
-
-        html = TMPL
-        for placeholder, value in replacements.items():
-            html = html.replace(placeholder, value)
-
-        with open(report_file, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info("HTML 리포트 생성 완료: %s (%d bytes)", report_file, len(html))
-
 # ════════════════════════════════════════════════════════════════════
 # 7. FASTAPI APPLICATION
 # ════════════════════════════════════════════════════════════════════
-
-def _sanitize_json(obj):
-    """inf/nan 등 JSON 비호환 float을 None으로 재귀 치환"""
-    import math
-    if isinstance(obj, float):
-        return None if (math.isnan(obj) or math.isinf(obj)) else obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_json(v) for v in obj]
-    return obj
-
 app = FastAPI(title="AIBox Unified Monitoring Portal", version="5.0")
 app.add_middleware(
     CORSMiddleware,
@@ -2020,7 +1453,7 @@ def api_overview():
     cache = _engine.get_cache()
     if not cache:
         return JSONResponse({**_EMPTY_SKELETON})
-    return JSONResponse(_sanitize_json({**cache, "is_collecting": False}))
+    return JSONResponse({**cache, "is_collecting": False})
 
 # ── Nodes ─────────────────────────────────────────────────────────
 @app.get("/api/v1/nodes")
@@ -2121,25 +1554,6 @@ def api_collector_health():
         "database": db_stats,
         "prometheus_ping_history": ping_hist,
     })
-
-
-# ── Node Trends (on-demand) ───────────────────────────────────────
-@app.get("/api/v1/nodes/{node_name}/trends")
-def api_node_trends(node_name: str, hours: int = Query(1, ge=1, le=24)):
-    data = _collector.query_node_trends(node_name, hours)
-    return JSONResponse(MetricsCollector._sanitize(data))
-
-# ── Node Conditions ───────────────────────────────────────────────
-@app.get("/api/v1/nodes/conditions")
-def api_node_conditions():
-    data = _collector.query_node_conditions()
-    return JSONResponse({"conditions": data})
-
-# ── VM Trends (on-demand) ─────────────────────────────────────────
-@app.get("/api/v1/vms/{namespace}/{vm_name}/trends")
-def api_vm_trends(namespace: str, vm_name: str, hours: int = Query(1, ge=1, le=24)):
-    data = _collector.query_vm_trends(vm_name, namespace, hours)
-    return JSONResponse(MetricsCollector._sanitize(data))
 
 # ── Legacy Report ─────────────────────────────────────────────────
 @app.get("/report.html")
@@ -2332,7 +1746,10 @@ SPA_HTML = r"""<!DOCTYPE html>
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
         Collector Health
       </div>
-
+      <div class="sb-item" data-page="legacy">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        Full Report
+      </div>
     </nav>
     <div class="sb-footer">
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -2371,127 +1788,40 @@ SPA_HTML = r"""<!DOCTYPE html>
     <div id="content">
       <!-- PAGE: OVERVIEW -->
       <div id="page-overview" class="page">
-        <!-- KPI Row -->
-        <div class="kpi-grid" id="kpi-row" style="margin-bottom:14px;"></div>
-
-        <!-- Row 2: Health + Infra quick status -->
+        <div class="kpi-grid" id="kpi-row"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
           <div class="card">
             <div class="sec-title">Cluster Health</div>
             <div id="health-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
           </div>
           <div class="card">
-            <div class="sec-title">Infrastructure Services</div>
-            <div id="infra-quick" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
+            <div class="sec-title">VM Status Distribution</div>
+            <div id="vm-status-chart" style="height:140px;display:flex;align-items:center;justify-content:center;"></div>
           </div>
         </div>
-
-        <!-- Row 3: Top 5 Panels -->
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
-          <div class="card">
-            <div class="sec-title" style="color:var(--accent2);">
-              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
-              Top 5 · CPU
-            </div>
-            <div id="top5-cpu"></div>
+        <div class="card">
+          <div class="sec-title" style="justify-content:space-between;">
+            CPU · Memory Trend (1h)
+            <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">SQLite 수집 이력</span>
           </div>
-          <div class="card">
-            <div class="sec-title" style="color:#a78bfa;">
-              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/></svg>
-              Top 5 · Memory
-            </div>
-            <div id="top5-mem"></div>
-          </div>
-          <div class="card">
-            <div class="sec-title" style="color:#34d399;">
-              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
-              Top 5 · Disk Used
-            </div>
-            <div id="top5-disk"></div>
-          </div>
-        </div>
-
-        <!-- Row 4: Trend Charts -->
-        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;">
-          <div class="card">
-            <div class="sec-title" style="justify-content:space-between;">
-              CPU · Memory Trend (1h)
-              <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">30s SQLite 이력</span>
-            </div>
-            <div class="chart-wrap" style="height:150px;"><canvas id="chart-cluster-trend"></canvas></div>
-          </div>
-          <div class="card">
-            <div class="sec-title">VM Status</div>
-            <div id="vm-status-chart" style="padding-top:4px;"></div>
+          <div class="chart-wrap" style="height:160px;">
+            <canvas id="chart-cluster-trend"></canvas>
           </div>
         </div>
       </div>
 
       <!-- PAGE: NODES -->
       <div id="page-nodes" class="page" style="display:none;">
-        <!-- 노드 개별 상태 카드 (kube_node_status_condition) -->
-        <div id="node-condition-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px;"></div>
-        <!-- 노드 테이블 -->
         <div class="card">
-          <div class="sec-title" style="justify-content:space-between;">
-            Node Metrics
-            <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">행 클릭 → 시계열 차트</span>
-          </div>
+          <div class="sec-title">Node Metrics</div>
           <div style="overflow-x:auto;">
             <table class="tbl" id="tbl-nodes">
               <thead><tr>
                 <th>Name</th><th>Roles</th><th>Status</th><th>Age</th>
                 <th>CPU (top)</th><th>CPU %</th><th>Memory (top)</th><th>Mem %</th>
-                <th>Net RX</th><th>Net TX</th>
               </tr></thead>
               <tbody id="tbody-nodes"></tbody>
             </table>
-          </div>
-        </div>
-        <!-- 노드 상세 차트 패널 (클릭 시 표시) -->
-        <div id="node-detail-panel" style="display:none;margin-top:14px;">
-          <div class="card">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div class="sec-title" style="margin-bottom:0;" id="node-detail-title">노드 상세</div>
-              <button onclick="document.getElementById('node-detail-panel').style.display='none'"
-                style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
-                       padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-net"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">디스크 I/O (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-disk"></canvas></div></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- VM 상세 모달 -->
-      <div id="vm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto;padding:20px;">
-        <div style="max-width:960px;margin:0 auto;background:var(--bg-card);border:1px solid var(--bd-bright);border-radius:12px;padding:24px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-            <div>
-              <div id="vm-modal-title" style="font-size:16px;font-weight:700;color:var(--txt-primary);"></div>
-              <div id="vm-modal-sub" style="font-size:11px;color:var(--txt-muted);margin-top:2px;"></div>
-            </div>
-            <button onclick="document.getElementById('vm-modal').style.display='none'"
-              style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
-                     padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;">✕ 닫기</button>
-          </div>
-          <!-- VM 정보 카드 -->
-          <div id="vm-modal-info" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:16px;"></div>
-          <!-- 디스크 볼륨 정보 -->
-          <div id="vm-modal-volumes" style="margin-bottom:16px;"></div>
-          <!-- 시계열 차트 -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:130px;"><canvas id="vm-chart-cpu"></canvas></div></div>
-            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:130px;"><canvas id="vm-chart-mem"></canvas></div></div>
-            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 RX/TX (bytes/s)</div><div style="height:130px;"><canvas id="vm-chart-net"></canvas></div></div>
-            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">디스크 Read/Write (bytes/s)</div><div style="height:130px;"><canvas id="vm-chart-disk"></canvas></div></div>
-          </div>
-          <div style="text-align:center;margin-top:10px;">
-            <div id="vm-modal-loading" style="color:var(--txt-muted);font-size:12px;">시계열 데이터 로딩 중...</div>
           </div>
         </div>
       </div>
@@ -2520,8 +1850,8 @@ SPA_HTML = r"""<!DOCTYPE html>
             <table class="tbl">
               <thead><tr>
                 <th>Name</th><th>Namespace</th><th>Status</th><th>Node</th>
-                <th>IP</th><th>CPU</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
-                <th>Disk Used</th><th>Net RX</th><th>Net TX</th><th>Age</th><th></th>
+                <th>IP</th><th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
+                <th>Net RX</th><th>Net TX</th><th>Age</th>
               </tr></thead>
               <tbody id="tbody-vms"></tbody>
             </table>
@@ -2645,7 +1975,12 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-</div>
+
+      <!-- PAGE: LEGACY REPORT -->
+      <div id="page-legacy" class="page" style="display:none;height:calc(100vh - 100px);">
+        <iframe src="/report.html" style="width:100%;height:100%;border:none;border-radius:8px;background:#fff;"></iframe>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2677,7 +2012,6 @@ document.getElementById('nav').addEventListener('click', e => {
   state.currentPage = page;
   if (page === 'collector') fetchCollector();
   if (page === 'performance') renderPerformance(state.overview);
-  if (page === 'nodes') loadNodeConditions();
 });
 
 // ═══════════════════════════════════════════════
@@ -2781,74 +2115,46 @@ function sparkDataset(label, data, color) {
 // ═══════════════════════════════════════════════
 // RENDER: OVERVIEW
 // ═══════════════════════════════════════════════
-function renderTop5(elId, items, valFn, color) {
-  if (!items || !items.length) {
-    document.getElementById(elId).innerHTML =
-      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">데이터 수집 중...</div>';
-    return;
-  }
-  document.getElementById(elId).innerHTML = items.map((vm, i) => {
-    const val = valFn(vm);
-    const pct = typeof val === 'number' ? Math.min(val, 100) : 0;
-    const label = typeof val === 'number' ? (elId.includes('disk') ? fmtBytes(vm.disk_used_bytes||0) : fmtPct(val)) : '—';
-    return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-          <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
-          <div style="min-width:0;">
-            <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
-            <div style="font-size:10px;color:var(--txt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.namespace}</div>
-          </div>
-        </div>
-        <span style="font-size:12px;font-weight:700;color:${color};flex-shrink:0;margin-left:6px;">${label}</span>
-      </div>
-      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${pct}%;"></div></div>
-    </div>`;
-  }).join('');
-}
-
 function renderOverview(d) {
   const c = d.cluster, ct = d.counts;
-
-  // ── KPI 카드 ──
-  const kpis = [
-    { label:'OCP Version',    value: d.ocp_version,     color:'var(--accent)',   sub:'' },
-    { label:'Nodes',          value: ct.nodes,           color:'var(--txt-primary)', sub:'' },
-    { label:'Running VMs',    value: ct.vms_running,     color:'var(--success)', sub:`/ ${ct.vms_total}` },
-    { label:'Stopped VMs',    value: ct.vms_stopped,     color:'var(--txt-muted)', sub:'' },
-    { label:'Provisioning',   value: ct.vms_provisioning,color:'var(--warn)',    sub:'' },
-    { label:'Failed VMs',     value: ct.vms_failed,      color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)', sub:'' },
-    { label:'Cluster CPU',    value: fmtPct(c.cpu_pct),  color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
-    { label:'Cluster Mem',    value: fmtPct(c.mem_pct),  color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
-    { label:'Firing Alerts',  value: c.firing_alerts,    color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)', sub:'' },
-    { label:'Operators OK',   value: `${(d.infra?.cluster_operators||[]).filter(o=>o.available&&!o.degraded).length} / ${ct.cluster_operators}`, color:'var(--success)', sub:'' },
-    { label:'PV / PVC',       value: `${ct.pv} / ${ct.pvc}`, color:'var(--accent2)', sub:'' },
-    { label:'Storage Pools',  value: ct.storage_pools,   color:'var(--txt-secondary)', sub:'' },
-  ];
-  document.getElementById('kpi-row').innerHTML = kpis.map(k => `
+  // KPI
+  document.getElementById('kpi-row').innerHTML = [
+    { label:'OCP Version', value: d.ocp_version, sub:'', color:'var(--accent)' },
+    { label:'Total Nodes', value: ct.nodes, sub:'', color:'var(--txt-primary)' },
+    { label:'VMs Running', value: ct.vms_running, sub:`/ ${ct.vms_total} total`, color:'var(--success)' },
+    { label:'VMs Stopped', value: ct.vms_stopped, sub:'', color:'var(--txt-muted)' },
+    { label:'VMs Failed', value: ct.vms_failed, sub:'', color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)' },
+    { label:'Firing Alerts', value: c.firing_alerts, sub:'', color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)' },
+    { label:'Cluster CPU', value: fmtPct(c.cpu_pct), sub:'', color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)' },
+    { label:'Cluster Mem', value: fmtPct(c.mem_pct), sub:'', color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)' },
+  ].map(k => `
     <div class="kpi">
       <div class="label">${k.label}</div>
-      <div class="value" style="color:${k.color};font-size:${String(k.value).length > 6 ? '16px' : '22px'}">${k.value}</div>
+      <div class="value" style="color:${k.color}">${k.value}</div>
       ${k.sub ? `<div class="sub">${k.sub}</div>` : ''}
-    </div>`).join('');
+    </div>
+  `).join('');
 
   // Alert badge
   const ab = document.getElementById('alert-badge');
-  if (c.firing_alerts > 0) { ab.style.display = ''; ab.textContent = `${c.firing_alerts} Firing Alerts`; }
-  else { ab.style.display = 'none'; }
+  if (c.firing_alerts > 0) {
+    ab.style.display = '';
+    ab.textContent = `${c.firing_alerts} Firing Alerts`;
+  } else { ab.style.display = 'none'; }
 
-  // ── Cluster Health 카드 ──
+  // Health cards
   document.getElementById('health-cards').innerHTML = [
     { label:'API Server', v: c.api_server },
-    { label:'ETCD',       v: c.etcd },
-    { label:'CoreDNS',    v: c.coredns },
-    { label:'ETCD Leader',v: c.etcd_leader },
+    { label:'ETCD', v: c.etcd },
+    { label:'CoreDNS', v: c.coredns },
+    { label:'ETCD Leader', v: c.etcd_leader },
   ].map(h => {
-    const ok = h.v != null && h.v >= 1, unk = h.v == null;
+    const ok = h.v != null && h.v >= 1;
+    const unk = h.v == null;
     const cls = unk ? 'badge-off' : ok ? 'badge-ok' : 'badge-err';
     const txt = unk ? 'N/A' : ok ? 'Healthy' : 'Unhealthy';
     return `<div class="card-sm" style="display:flex;align-items:center;gap:8px;">
-      <span class="dot ${unk?'dot-off':ok?'dot-ok':'dot-err'}"></span>
+      <span class="dot ${unk ? 'dot-off' : ok ? 'dot-ok' : 'dot-err'}"></span>
       <div>
         <div style="font-size:11px;color:var(--txt-muted);">${h.label}</div>
         <div class="badge ${cls}" style="margin-top:3px;">${txt}</div>
@@ -2856,83 +2162,25 @@ function renderOverview(d) {
     </div>`;
   }).join('');
 
-  // ── Infra Quick Status ──
-  const im = d.infra || {};
-  const r = im.router || {};
-  document.getElementById('infra-quick').innerHTML = [
-    { label:'Router Req/s',    v: r.req_rate != null ? r.req_rate.toFixed(1)+'/s' : '—',   ok: r.req_rate != null },
-    { label:'Router 5xx/s',   v: r['5xx_rate'] != null ? r['5xx_rate'].toFixed(2)+'/s':'—', ok: r['5xx_rate'] != null && r['5xx_rate'] < 1 },
-    { label:'Pending Pods',   v: im.scheduler?.pending != null ? Math.round(im.scheduler.pending) : '—', ok: (im.scheduler?.pending||0) < 5 },
-    { label:'OVN Ports',      v: im.ovn?.ports != null ? Math.round(im.ovn.ports) : '—',   ok: im.ovn?.ports != null },
-    { label:'Registry Req/s', v: im.registry?.req_rate != null ? im.registry.req_rate.toFixed(2)+'/s':'—', ok: im.registry?.req_rate != null },
-    { label:'Operators Deg.', v: (im.cluster_operators||[]).filter(o=>o.degraded).length,   ok: (im.cluster_operators||[]).filter(o=>o.degraded).length === 0 },
-  ].map(({label,v,ok}) => `
-    <div class="card-sm" style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span class="dot ${ok?'dot-ok':'dot-warn'}"></span>
-        <span style="font-size:11px;color:var(--txt-secondary);">${label}</span>
-      </div>
-      <span style="font-size:12px;font-weight:700;color:var(--txt-primary);">${v}</span>
-    </div>`).join('');
-
-  // ── Top 5 VMs ──
-  const vms = d.vms || [];
-  const running = vms.filter(v => v.status_group === 'running');
-
-  // CPU Top 5
-  const top5cpu = [...running].filter(v => v.cpu_pct != null)
-    .sort((a,b) => (b.cpu_pct||0) - (a.cpu_pct||0)).slice(0,5);
-  renderTop5('top5-cpu', top5cpu, v => v.cpu_pct, '#3b82f6');
-
-  // Memory Top 5
-  const top5mem = [...running].filter(v => v.mem_pct != null)
-    .sort((a,b) => (b.mem_pct||0) - (a.mem_pct||0)).slice(0,5);
-  renderTop5('top5-mem', top5mem, v => v.mem_pct, '#a78bfa');
-
-  // Disk Top 5 (disk_used_bytes 기준, running 아닌 것도 포함)
-  const top5disk = [...vms].filter(v => (v.disk_used_bytes||0) > 0)
-    .sort((a,b) => (b.disk_used_bytes||0) - (a.disk_used_bytes||0)).slice(0,5);
-  // disk는 절대값 비교 — 최대값 대비 %로 bar 표시
-  const maxDisk = top5disk[0]?.disk_used_bytes || 1;
-  if (top5disk.length) {
-    document.getElementById('top5-disk').innerHTML = top5disk.map((vm,i) => {
-      const pct = Math.round((vm.disk_used_bytes||0) / maxDisk * 100);
-      return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-          <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-            <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
-            <div style="min-width:0;">
-              <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
-              <div style="font-size:10px;color:var(--txt-muted);">${vm.namespace}</div>
-            </div>
-          </div>
-          <span style="font-size:12px;font-weight:700;color:#34d399;flex-shrink:0;margin-left:6px;">${fmtBytes(vm.disk_used_bytes||0)}</span>
-        </div>
-        <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%;"></div></div>
-      </div>`;
-    }).join('');
-  } else {
-    document.getElementById('top5-disk').innerHTML =
-      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">수집 중 (30s 후 표시)</div>';
-  }
-
-  // ── VM Status 바 ──
+  // VM Status donut (simple bars)
   const total = ct.vms_total || 1;
-  document.getElementById('vm-status-chart').innerHTML = [
-    ['Running',     ct.vms_running,     'var(--success)'],
-    ['Stopped',     ct.vms_stopped,     'var(--txt-muted)'],
-    ['Provisioning',ct.vms_provisioning,'var(--warn)'],
-    ['Failed',      ct.vms_failed,      'var(--danger)'],
-  ].map(([lbl,cnt,color]) => `
-    <div style="margin-bottom:9px;">
-      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
-        <span style="color:var(--txt-secondary);">${lbl}</span>
-        <span style="color:${color};font-weight:700;">${cnt} <span style="color:var(--txt-muted);font-weight:400;">(${Math.round(cnt/total*100)}%)</span></span>
-      </div>
-      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%;"></div></div>
-    </div>`).join('');
+  document.getElementById('vm-status-chart').innerHTML = `
+    <div style="width:100%;">
+      ${[['Running', ct.vms_running, 'var(--success)'],
+         ['Stopped', ct.vms_stopped, 'var(--txt-muted)'],
+         ['Provisioning', ct.vms_provisioning, 'var(--warn)'],
+         ['Failed', ct.vms_failed, 'var(--danger)'],
+        ].map(([lbl, cnt, color]) => `
+        <div style="margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+            <span style="color:var(--txt-secondary);">${lbl}</span>
+            <span style="color:${color};font-weight:600;">${cnt}</span>
+          </div>
+          <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%"></div></div>
+        </div>`).join('')}
+    </div>`;
 
-  // ── Trend Chart ──
+  // Fetch trend and chart it
   fetch('/api/v1/trends/cluster?hours=1').then(r => r.json()).then(t => {
     mkChart('chart-cluster-trend', t.labels,
       [sparkDataset('CPU %', t.cpu, '#3b82f6'),
@@ -2944,115 +2192,10 @@ function renderOverview(d) {
 // ═══════════════════════════════════════════════
 // RENDER: NODES
 // ═══════════════════════════════════════════════
-let _nodeConditions = {};
-
-async function loadNodeConditions() {
-  try {
-    const d = await fetch('/api/v1/nodes/conditions').then(r => r.json());
-    _nodeConditions = {};
-    (d.conditions || []).forEach(c => { _nodeConditions[c.node] = c; });
-    renderNodeCards();
-  } catch(e) {}
-}
-
-function renderNodeCards() {
-  const nodes = state.overview?.nodes || [];
-  const el = document.getElementById('node-condition-cards');
-  if (!el) return;
-  el.innerHTML = nodes.map(n => {
-    const c = _nodeConditions[n.name] || {};
-    const ready = c.ready !== undefined ? c.ready : (n.status === 'Ready' ? 1 : 0);
-    const mem_p = c.memory_pressure || 0;
-    const disk_p = c.disk_pressure || 0;
-    const pid_p  = c.pid_pressure || 0;
-    const net_u  = c.network_unavailable || 0;
-
-    const ok = ready && !mem_p && !disk_p && !pid_p && !net_u;
-    const warn = ready && (mem_p || disk_p || pid_p);
-    const bc = ok ? 'var(--success)' : warn ? 'var(--warn)' : 'var(--danger)';
-    const st = ok ? 'Ready' : warn ? 'Pressure' : 'NotReady';
-
-    const pressures = [
-      mem_p  ? '<span style="font-size:9px;background:rgba(245,158,11,.2);color:#fbbf24;padding:1px 4px;border-radius:3px;">Mem</span>' : '',
-      disk_p ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">Disk</span>' : '',
-      pid_p  ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">PID</span>' : '',
-      net_u  ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">Net</span>' : '',
-    ].filter(Boolean).join(' ');
-
-    const isWorker = n.roles.includes('worker');
-    const roleColor = isWorker ? 'var(--accent)' : 'var(--accent2)';
-    const roleLabel = isWorker ? 'Worker' : 'Master';
-
-    return `<div onclick="openNodeDetail('${n.name}')"
-      style="background:var(--bg-card);border:1px solid ${bc}33;border-radius:10px;padding:12px;cursor:pointer;
-             transition:border-color .15s;hover:border-color:${bc};">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
-        <div style="width:8px;height:8px;border-radius:50%;background:${bc};flex-shrink:0;
-                    box-shadow:0 0 6px ${bc};"></div>
-        <span style="font-size:11px;font-weight:700;color:var(--txt-primary);white-space:nowrap;
-                     overflow:hidden;text-overflow:ellipsis;flex:1;">${n.name.split('.')[0]}</span>
-        <span style="font-size:9px;font-weight:700;color:${roleColor};flex-shrink:0;">${roleLabel}</span>
-      </div>
-      <div style="font-size:10px;color:${bc};font-weight:700;margin-bottom:6px;">${st} ${pressures}</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-        <div>
-          <div style="font-size:9px;color:var(--txt-muted);margin-bottom:2px;">CPU</div>
-          <div class="pbar"><div class="pbar-fill ${pbarColor(n.cpu_pct)}" style="width:${n.cpu_pct||0}%"></div></div>
-          <div style="font-size:9px;color:var(--txt-secondary);margin-top:1px;">${fmtPct(n.cpu_pct)}</div>
-        </div>
-        <div>
-          <div style="font-size:9px;color:var(--txt-muted);margin-bottom:2px;">Mem</div>
-          <div class="pbar"><div class="pbar-fill ${pbarColor(n.mem_pct)}" style="width:${n.mem_pct||0}%"></div></div>
-          <div style="font-size:9px;color:var(--txt-secondary);margin-top:1px;">${fmtPct(n.mem_pct)}</div>
-        </div>
-      </div>
-      ${(n.net_rx_bps || n.net_tx_bps) ? `<div style="display:flex;justify-content:space-between;margin-top:6px;font-size:9px;color:var(--txt-muted);">
-        <span>↓${fmtBps(n.net_rx_bps)}</span><span>↑${fmtBps(n.net_tx_bps)}</span>
-      </div>` : ''}
-      <div style="font-size:9px;color:var(--txt-muted);margin-top:3px;text-align:center;">클릭 → 시계열</div>
-    </div>`;
-  }).join('');
-}
-
-async function openNodeDetail(nodeName) {
-  const panel = document.getElementById('node-detail-panel');
-  document.getElementById('node-detail-title').textContent = nodeName + ' — 시계열 (1h)';
-  panel.style.display = '';
-  panel.scrollIntoView({behavior:'smooth'});
-  // 차트 초기화
-  ['nd-chart-cpu','nd-chart-mem','nd-chart-net','nd-chart-disk'].forEach(id => {
-    if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
-    const c = document.getElementById(id);
-    if (c) c.insertAdjacentHTML('afterend', '<div style="font-size:11px;color:var(--txt-muted);padding:8px;">로딩 중...</div>');
-  });
-  try {
-    const d = await fetch(`/api/v1/nodes/${encodeURIComponent(nodeName)}/trends?hours=1`).then(r => r.json());
-    const lbl = d.labels || [];
-    [['nd-chart-cpu','CPU %',d.cpu,'#3b82f6',0,100],
-     ['nd-chart-mem','Mem %',d.mem,'#a78bfa',0,100],
-    ].forEach(([id,lbl2,vals,color,mn,mx]) => {
-      document.getElementById(id)?.nextSibling?.remove?.();
-      mkChart(id, lbl, [sparkDataset(lbl2, vals||[], color)], {yMin:mn,yMax:mx});
-    });
-    mkChart('nd-chart-net', lbl, [
-      sparkDataset('RX', d.net_rx||[], '#06b6d4'),
-      sparkDataset('TX', d.net_tx||[], '#34d399'),
-    ], {legend:true});
-    mkChart('nd-chart-disk', lbl, [
-      sparkDataset('Read', d.disk_r||[], '#f59e0b'),
-      sparkDataset('Write', d.disk_w||[], '#f87171'),
-    ], {legend:true});
-    // 로딩 메시지 제거
-    document.querySelectorAll('[id^="nd-chart-"]').forEach(c => c.nextSibling?.remove?.());
-  } catch(e) {
-    document.getElementById('node-detail-title').textContent += ' (데이터 없음)';
-  }
-}
-
 function renderNodes(nodes) {
   document.getElementById('tbody-nodes').innerHTML = nodes.map(n => {
     const cpc = pbarColor(n.cpu_pct), mpc = pbarColor(n.mem_pct);
-    return `<tr style="cursor:pointer;" onclick="openNodeDetail('${n.name}')">
+    return `<tr>
       <td class="mono" style="color:var(--accent2)">${n.name}</td>
       <td><span class="badge badge-off">${n.roles}</span></td>
       <td><span class="dot ${n.status==='Ready'?'dot-ok':'dot-err'}"></span> ${n.status}</td>
@@ -3061,107 +2204,9 @@ function renderNodes(nodes) {
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${cpc}" style="width:${n.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.cpu_pct)}</span></div></td>
       <td class="mono">${n.mem_usage}</td>
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${mpc}" style="width:${n.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.mem_pct)}</span></div></td>
-      <td class="mono" style="font-size:10px;color:var(--txt-secondary);">${fmtBps(n.net_rx_bps)}</td>
-      <td class="mono" style="font-size:10px;color:var(--txt-secondary);">${fmtBps(n.net_tx_bps)}</td>
     </tr>`;
   }).join('');
 }
-
-// ═══════════════════════════════════════════════
-// ═══════════════════════════════════════════════
-// VM DETAIL MODAL
-// ═══════════════════════════════════════════════
-async function openVMDetail(vmName, ns) {
-  const vm = _allVMs.find(v => v.name === vmName && v.namespace === ns);
-  if (!vm) return;
-
-  // 모달 열기
-  const modal = document.getElementById('vm-modal');
-  modal.style.display = '';
-  document.getElementById('vm-modal-title').textContent = vmName;
-  document.getElementById('vm-modal-sub').textContent = ns + '  ·  ' + vm.node + '  ·  ' + (vm.os || '—');
-  document.getElementById('vm-modal-loading').textContent = '시계열 로딩 중...';
-
-  // 정보 카드
-  document.getElementById('vm-modal-info').innerHTML = [
-    ['상태',        statusBadge(vm.status_group)],
-    ['IP',          `<span class="mono" style="font-size:11px">${vm.ip}</span>`],
-    ['CPU Cores',   vm.cpu_cores],
-    ['Memory',      vm.memory_total],
-    ['CPU 사용률',  fmtPct(vm.cpu_pct)],
-    ['Mem 사용률',  fmtPct(vm.mem_pct)],
-    ['Net RX',      fmtBps(vm.net_rx_bps)],
-    ['Net TX',      fmtBps(vm.net_tx_bps)],
-    ['Disk Used',   vm.disk_used_bytes ? fmtBytes(vm.disk_used_bytes) : '—'],
-    ['Age',         vm.age],
-  ].map(([l,v]) => `<div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:8px 10px;">
-    <div style="font-size:9px;color:var(--txt-muted);margin-bottom:3px;text-transform:uppercase;">${l}</div>
-    <div style="font-size:12px;font-weight:600;">${v}</div>
-  </div>`).join('');
-
-  // 볼륨 정보 (root/data 구분)
-  const vols = vm.volumes || [];
-  if (vols.length) {
-    document.getElementById('vm-modal-volumes').innerHTML =
-      '<div style="font-size:11px;font-weight:700;color:var(--txt-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em;">Volumes</div>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:6px;">' +
-      vols.map(vl => {
-        const isRoot = (vl.name||'').endsWith('-rootdisk') || (vl.pvc||'').endsWith('-rootdisk');
-        const used = vl.used_bytes || 0;
-        const cap  = vl.capacity_bytes || 0;
-        const pct  = cap ? Math.round(used/cap*100) : 0;
-        const dtype = isRoot ? 'Root' : 'Data';
-        const dc = isRoot ? 'var(--accent2)' : 'var(--accent)';
-        return `<div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:8px 12px;min-width:160px;">
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span style="font-size:10px;font-weight:700;color:${dc};">${dtype}</span>
-            <span style="font-size:10px;color:var(--txt-muted);">${vl.name||vl.pvc||'—'}</span>
-          </div>
-          ${cap ? `<div style="font-size:11px;color:var(--txt-secondary);">${fmtBytes(used)} / ${fmtBytes(cap)}</div>
-          <div class="pbar" style="margin-top:4px;"><div class="pbar-fill" style="background:${dc};width:${pct}%"></div></div>` : '<div style="font-size:11px;color:var(--txt-muted);">용량 정보 없음</div>'}
-        </div>`;
-      }).join('') + '</div>';
-  } else {
-    document.getElementById('vm-modal-volumes').innerHTML = '';
-  }
-
-  // 차트 초기화
-  ['vm-chart-cpu','vm-chart-mem','vm-chart-net','vm-chart-disk'].forEach(id => {
-    if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
-  });
-
-  // 시계열 데이터 로드
-  try {
-    const d = await fetch(`/api/v1/vms/${encodeURIComponent(ns)}/${encodeURIComponent(vmName)}/trends?hours=1`).then(r => r.json());
-    const lbl = d.labels || [];
-    const hasData = lbl.length > 0;
-
-    if (hasData) {
-      mkChart('vm-chart-cpu', lbl, [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0,yMax:100});
-      mkChart('vm-chart-mem', lbl, [sparkDataset('Mem %', d.mem_pct||[], '#a78bfa')], {yMin:0,yMax:100});
-      mkChart('vm-chart-net', lbl, [
-        sparkDataset('RX', d.net_rx||[], '#06b6d4'),
-        sparkDataset('TX', d.net_tx||[], '#34d399'),
-      ], {legend:true});
-      mkChart('vm-chart-disk', lbl, [
-        sparkDataset('Read', d.disk_r||[], '#f59e0b'),
-        sparkDataset('Write', d.disk_w||[], '#f87171'),
-      ], {legend:true});
-      document.getElementById('vm-modal-loading').textContent = '';
-    } else {
-      document.getElementById('vm-modal-loading').textContent = vm.status_group !== 'running'
-        ? 'VM이 실행 중이 아니어서 시계열 데이터가 없습니다.'
-        : 'Prometheus 데이터가 아직 없습니다. (최소 2분 필요)';
-    }
-  } catch(e) {
-    document.getElementById('vm-modal-loading').textContent = '시계열 로드 실패: ' + e.message;
-  }
-}
-
-// 모달 외부 클릭 시 닫기
-document.getElementById('vm-modal').addEventListener('click', function(e) {
-  if (e.target === this) this.style.display = 'none';
-});
 
 // ═══════════════════════════════════════════════
 // RENDER: VMs
@@ -3185,31 +2230,20 @@ function filterVMs() {
     (!ns || v.namespace === ns) &&
     (!st || v.status_group === st)
   );
-  document.getElementById('tbody-vms').innerHTML = filtered.map(v => {
-    // root/data 디스크 구분
-    const vols = v.volumes || [];
-    const rootVol = vols.find(vl => (vl.name||'').endsWith('-rootdisk') || (vl.pvc||'').endsWith('-rootdisk'));
-    const dataVols = vols.filter(vl => vl !== rootVol);
-    const rootUsed = rootVol?.used_bytes || 0;
-    const dataUsed = dataVols.reduce((s,vl) => s + (vl.used_bytes||0), 0);
-    const diskTotal = v.disk_used_bytes || 0;
-    return `<tr style="cursor:pointer;" onclick="openVMDetail('${v.name}','${v.namespace}')">
-      <td class="mono" style="color:var(--accent2)">${v.name}</td>
-      <td><span class="badge badge-off" style="max-width:100px;overflow:hidden;text-overflow:ellipsis;">${v.namespace}</span></td>
-      <td>${statusBadge(v.status_group)}</td>
-      <td style="color:var(--txt-secondary);font-size:11px;">${v.node.split('.')[0]}</td>
-      <td class="mono" style="font-size:11px;">${v.ip}</td>
-      <td style="text-align:center;">${v.cpu_cores}</td>
-      <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.cpu_pct)}" style="width:${v.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.cpu_pct)}</span></div></td>
-      <td style="font-size:11px;">${v.memory_total}</td>
-      <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.mem_pct)}" style="width:${v.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.mem_pct)}</span></div></td>
-      <td class="mono" style="font-size:10px;">${diskTotal ? fmtBytes(diskTotal) : '—'}</td>
-      <td class="mono" style="font-size:10px;">${fmtBps(v.net_rx_bps)}</td>
-      <td class="mono" style="font-size:10px;">${fmtBps(v.net_tx_bps)}</td>
-      <td style="font-size:11px;">${v.age}</td>
-      <td style="font-size:10px;color:var(--accent);text-align:center;">📈</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="14" style="text-align:center;color:var(--txt-muted);padding:24px;">VM 없음</td></tr>';
+  document.getElementById('tbody-vms').innerHTML = filtered.map(v => `<tr>
+    <td class="mono" style="color:var(--accent2)">${v.name}</td>
+    <td><span class="badge badge-off">${v.namespace}</span></td>
+    <td>${statusBadge(v.status_group)}</td>
+    <td style="color:var(--txt-secondary);font-size:11px;">${v.node}</td>
+    <td class="mono" style="font-size:11px;">${v.ip}</td>
+    <td style="text-align:center;">${v.cpu_cores}</td>
+    <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.cpu_pct)}" style="width:${v.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.cpu_pct)}</span></div></td>
+    <td style="font-size:11px;">${v.memory_total}</td>
+    <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.mem_pct)}" style="width:${v.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.mem_pct)}</span></div></td>
+    <td class="mono" style="font-size:10px;">${fmtBps(v.net_rx_bps)}</td>
+    <td class="mono" style="font-size:10px;">${fmtBps(v.net_tx_bps)}</td>
+    <td style="font-size:11px;">${v.age}</td>
+  </tr>`).join('') || '<tr><td colspan="12" style="text-align:center;color:var(--txt-muted);padding:24px;">VM 없음</td></tr>';
 }
 document.getElementById('vm-search').addEventListener('input', filterVMs);
 document.getElementById('vm-ns-filter').addEventListener('change', filterVMs);
@@ -3465,7 +2499,6 @@ function renderAll(d) {
 
   renderOverview(d);
   renderNodes(d.nodes || []);
-  renderNodeCards();
   renderVMs(d.vms || []);
   renderStorage(d.storage || {});
   renderInfra(d.infra || {});
@@ -3505,7 +2538,6 @@ async function init() {
         document.getElementById('app').style.display = '';
         startCountdown();
         fetchAll();  // 비동기로 데이터 로드 시작
-        loadNodeConditions();
         return;
       }
     } catch(e) { /* 서버 아직 준비 안됨 */ }
