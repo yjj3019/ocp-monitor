@@ -912,9 +912,9 @@ class MetricsCollector:
                 queries[key] = f'min(up{{job="{matched[cat]}"}}) by ()'
         queries.update({
             "leader": "min(etcd_server_has_leader) by ()",
-            "alerts": 'count(ALERTS{alertstate="firing"}) or vector(0)',
-            "cpu": '(1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100',
-            "mem": '(1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100',
+            "alerts": 'count(ALERTS{alertstate="firing",alertname!="Watchdog",alertname!~"InfoInhibitor.*"}) or vector(0)',
+            "cpu": 'clamp_min((1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)',
+            "mem": 'clamp_min((1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100, 0)',
         })
         with ThreadPoolExecutor(max_workers=max(len(queries), 1)) as ex:
             futs = {ex.submit(self._query, q): k for k, q in queries.items()}
@@ -1046,8 +1046,8 @@ class MetricsCollector:
         nrt: Dict[str, Dict[str, float]] = {}
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = {
-                ex.submit(self._query, '(1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'): "cpu",
-                ex.submit(self._query, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'): "mem",
+                ex.submit(self._query, 'clamp_min((1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)'): "cpu",
+                ex.submit(self._query, 'clamp_min((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100, 0)'): "mem",
             }
             for fut in as_completed(futs):
                 k = futs[fut]
@@ -1290,6 +1290,10 @@ class PollingEngine:
                 self._cache = self.collector.get_metrics_snapshot()
             self._update_prom_status(*self.collector.ping_prometheus())
             logger.info("초기 수집 완료 — nodes=%d vms=%d", len(m.nodes), len(m.vms))
+            try:
+                HTMLReportBuilder().build(m, REPORT_HTML)
+            except Exception as e:
+                logger.warning("초기 HTML 리포트 생성 실패: %s", e)
         except Exception as e:
             logger.error("초기 수집 실패: %s", e)
 
@@ -1326,6 +1330,12 @@ class PollingEngine:
             with self._cache_lock:
                 self._cache = self.collector.get_metrics_snapshot()
 
+            # HTML 리포트 생성 (Full Report 탭용)
+            try:
+                HTMLReportBuilder().build(self.collector.metrics, REPORT_HTML)
+            except Exception as e:
+                logger.warning("HTML 리포트 생성 실패: %s", e)
+
             logger.info("--- Polling cycle #%d 완료 (%.0fms, %s) ---", cycle_id, duration_ms, status)
 
             elapsed = time.time() - t0
@@ -1344,6 +1354,378 @@ class PollingEngine:
     def get_cache(self) -> Dict[str, Any]:
         with self._cache_lock:
             return dict(self._cache)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6b. HTML REPORT BUILDER  (vm_metrics_report.py 기능 통합)
+# ════════════════════════════════════════════════════════════════════
+class HTMLReportBuilder:
+    """
+    수집된 SystemMetrics를 받아 vm_metrics_report.py 스타일의
+    정적 HTML 리포트를 생성한다.
+    """
+
+    @staticmethod
+    def _fmt_bytes(b: int) -> str:
+        if b == 0: return "0 B"
+        names = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+        v, i = float(b), 0
+        while v >= 1024 and i < len(names) - 1: v /= 1024.0; i += 1
+        return f"{v:.2f} {names[i]}"
+
+    @staticmethod
+    def _fmt_pct(v) -> str:
+        return f"{v:.1f}%" if v is not None else "N/A"
+
+    @staticmethod
+    def _pct_color(v) -> str:
+        if v is None: return "#64748b"
+        if v < 70: return "#10b981"
+        if v < 90: return "#f59e0b"
+        return "#ef4444"
+
+    @staticmethod
+    def _pct_bar(v, label="") -> str:
+        c = HTMLReportBuilder._pct_color(v)
+        w = f"{min(v,100):.1f}" if v is not None else "0"
+        txt = HTMLReportBuilder._fmt_pct(v)
+        return (f"<div style='margin-bottom:6px'>"
+                f"<div style='display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-bottom:2px'>"
+                f"<span>{escape(label)}</span><span style='color:{c};font-weight:700'>{txt}</span></div>"
+                f"<div style='background:#1e293b;border-radius:3px;height:5px;overflow:hidden'>"
+                f"<div style='background:{c};height:5px;border-radius:3px;width:{w}%'></div></div></div>")
+
+    @staticmethod
+    def _status_badge(sg: str) -> str:
+        m = {"running": ("#10b981","Running"), "stopped": ("#64748b","Stopped"),
+             "provisioning": ("#f59e0b","Provisioning"), "failed": ("#ef4444","Failed"),
+             "unknown": ("#475569","Unknown")}
+        c, t = m.get(sg, ("#475569","Unknown"))
+        return (f"<span style='background:{c}22;color:{c};border:1px solid {c}55;"
+                f"padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700'>{t}</span>")
+
+    def build(self, m: SystemMetrics, report_file: str = REPORT_HTML) -> None:
+        h = m.cluster_health
+        im = m.infra
+
+        # ── 클러스터 오퍼레이터 요약 ──────────────────────────────
+        ok_ops  = sum(1 for o in im.cluster_operators if o.available and not o.degraded)
+        deg_ops = sum(1 for o in im.cluster_operators if o.degraded)
+        prog_ops= sum(1 for o in im.cluster_operators if o.progressing and not o.degraded)
+
+        op_cells = ""
+        for op in sorted(im.cluster_operators,
+                         key=lambda o: (not o.degraded, not o.progressing, o.name)):
+            if op.degraded:      c, dot = "#ef4444", "#ef4444"
+            elif op.progressing: c, dot = "#f59e0b", "#f59e0b"
+            elif op.available:   c, dot = "#10b981", "#10b981"
+            else:                c, dot = "#64748b", "#64748b"
+            tip = escape(op.message[:120]) if op.message else ""
+            op_cells += (
+                f"<div title='{tip}' style='background:#1e293b;border:1px solid #1e3a5f;border-radius:6px;"
+                f"padding:7px 9px;'>"
+                f"<div style='display:flex;align-items:center;gap:5px;margin-bottom:2px'>"
+                f"<div style='width:7px;height:7px;border-radius:50%;background:{dot};flex-shrink:0'></div>"
+                f"<span style='font-size:11px;font-weight:600;color:#e2e8f0;white-space:nowrap;"
+                f"overflow:hidden;text-overflow:ellipsis'>{escape(op.name)}</span></div>"
+                f"<div style='font-size:10px;color:{c};padding-left:12px;font-family:monospace'>{escape(op.version)}</div>"
+                f"</div>"
+            )
+
+        # ── 노드 행 ─────────────────────────────────────────────
+        node_rows = ""
+        for n in m.nodes:
+            sc = "#10b981" if n.status == "Ready" else "#ef4444"
+            node_rows += (
+                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(n.name)}</td>"
+                f"<td><span style='background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:3px;"
+                f"font-size:10px'>{escape(n.roles)}</span></td>"
+                f"<td><span style='color:{sc}'>{escape(n.status)}</span></td>"
+                f"<td>{escape(n.age)}</td>"
+                f"<td style='font-family:monospace'>{escape(n.cpu_usage)}</td>"
+                f"<td>{self._pct_bar(n.cpu_pct_realtime)}</td>"
+                f"<td style='font-family:monospace'>{escape(n.memory_usage)}</td>"
+                f"<td>{self._pct_bar(n.memory_pct_realtime)}</td></tr>"
+            )
+
+        # ── VM 행 ────────────────────────────────────────────────
+        vm_rows = ""
+        prev_ns = None
+        for vm in sorted(m.vms, key=lambda v: (v.namespace, v.name)):
+            if vm.namespace != prev_ns:
+                prev_ns = vm.namespace
+                vm_rows += (
+                    f"<tr><td colspan='12' style='background:#0f172a;color:#7dd3fc;"
+                    f"font-size:11px;font-weight:700;padding:6px 10px;border-top:2px solid #1e3a5f'>"
+                    f"📁 {escape(vm.namespace)}</td></tr>"
+                )
+            net_rx = f"{vm.net_rx_bps/1024:.1f} KB/s" if vm.net_rx_bps else "—"
+            net_tx = f"{vm.net_tx_bps/1024:.1f} KB/s" if vm.net_tx_bps else "—"
+            vm_rows += (
+                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(vm.name)}</td>"
+                f"<td>{self._status_badge(vm.status_group)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{escape(vm.node)}</td>"
+                f"<td style='font-size:11px'>{escape(vm.ip_address)}</td>"
+                f"<td style='text-align:center'>{escape(vm.cpu_cores)}</td>"
+                f"<td>{self._pct_bar(vm.cpu_usage_pct)}</td>"
+                f"<td style='font-size:11px'>{escape(vm.memory_total)}</td>"
+                f"<td>{self._pct_bar(vm.memory_usage_pct)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{net_rx}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{net_tx}</td>"
+                f"<td style='font-size:11px;color:#64748b'>{escape(vm.os_info[:30])}</td>"
+                f"<td style='font-size:11px'>{escape(vm.creation_time)}</td></tr>"
+            )
+
+        # ── 스토리지 풀 행 ───────────────────────────────────────
+        pool_rows = ""
+        for p in m.storage_pools.values():
+            used_pct = p.used_capacity_bytes / p.total_capacity_bytes * 100 if p.total_capacity_bytes else 0
+            pool_rows += (
+                f"<tr><td style='color:#67e8f9'>{escape(p.name)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{escape(p.provisioner)}</td>"
+                f"<td style='text-align:center'>{p.pv_count}</td>"
+                f"<td style='text-align:center'>{p.pvc_count}</td>"
+                f"<td>{self._fmt_bytes(p.total_capacity_bytes)}</td>"
+                f"<td>{self._fmt_bytes(p.used_capacity_bytes)}</td>"
+                f"<td>{self._pct_bar(used_pct)}</td></tr>"
+            )
+
+        # ── 인프라 서비스 카드 ───────────────────────────────────
+        def svc_card(title, color, items):
+            rows = "".join(
+                f"<div style='display:flex;justify-content:space-between;padding:5px 0;"
+                f"border-bottom:1px solid #1e293b'>"
+                f"<span style='font-size:11px;color:#64748b'>{l}</span>"
+                f"<span style='font-size:12px;font-weight:700;color:{vc}'>{v}</span></div>"
+                for l, v, vc in items
+            )
+            return (
+                f"<div style='background:#111827;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden'>"
+                f"<div style='background:{color}11;padding:8px 12px;border-bottom:1px solid {color}33'>"
+                f"<span style='font-size:11px;font-weight:700;color:#e2e8f0;letter-spacing:.05em'>{title}</span></div>"
+                f"<div style='padding:8px 12px'>{rows}</div></div>"
+            )
+
+        svc_cards = svc_card("INGRESS ROUTER", "#06b6d4", [
+            ("Req/s",    f"{im.router_req_rate:.1f}/s" if im.router_req_rate is not None else "N/A", "#06b6d4"),
+            ("4xx/s",    f"{im.router_4xx_rate:.2f}/s" if im.router_4xx_rate is not None else "N/A", "#f59e0b"),
+            ("5xx/s",    f"{im.router_5xx_rate:.2f}/s" if im.router_5xx_rate is not None else "N/A", "#ef4444"),
+            ("Sessions", str(int(im.router_sessions)) if im.router_sessions is not None else "N/A", "#3b82f6"),
+        ])
+
+        sc_pend = im.sched_pending
+        sc_c    = "#ef4444" if sc_pend and sc_pend > 10 else "#10b981"
+        svc_cards += svc_card("SCHEDULER", "#a78bfa", [
+            ("Pending Pods", str(int(sc_pend)) if sc_pend is not None else "N/A", sc_c),
+        ])
+        ovn_ok = im.ovn_nb_leader is not None and im.ovn_nb_leader >= 1
+        svc_cards += svc_card("OVN-KUBERNETES", "#2dd4bf", [
+            ("Logical Ports", str(int(im.ovn_ports)) if im.ovn_ports is not None else "N/A", "#2dd4bf"),
+            ("NB DB Leader",  "Leader" if ovn_ok else "N/A", "#10b981" if ovn_ok else "#64748b"),
+        ])
+        svc_cards += svc_card("IMAGE REGISTRY", "#34d399", [
+            ("Req/s", f"{im.reg_req_rate:.2f}/s" if im.reg_req_rate is not None else "N/A", "#34d399"),
+        ])
+
+        # ── MCP 카드 ─────────────────────────────────────────────
+        mcp_html = ""
+        for p in im.mcp_pools:
+            dg = p.degraded_count > 0
+            ok_all = p.ready_count == p.machine_count and p.machine_count > 0
+            bc = "#ef4444" if dg else ("#10b981" if ok_all else "#f59e0b")
+            st = "Degraded" if dg else ("Ready" if ok_all else "Updating")
+            mcp_html += (
+                f"<div style='background:#111827;border:1px solid {bc}33;border-radius:8px;padding:12px'>"
+                f"<div style='display:flex;justify-content:space-between;margin-bottom:8px'>"
+                f"<span style='font-weight:700;color:#e2e8f0'>{escape(p.name)}</span>"
+                f"<span style='font-size:11px;font-weight:700;color:{bc}'>{st}</span></div>"
+                f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:4px'>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Total</div><div style='font-weight:700'>{p.machine_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Ready</div><div style='font-weight:700;color:#10b981'>{p.ready_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Updated</div><div style='font-weight:700;color:#06b6d4'>{p.updated_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Degraded</div>"
+                f"<div style='font-weight:700;color:{"#ef4444" if dg else "#64748b"}'>{p.degraded_count}</div></div>"
+                f"</div></div>"
+            )
+
+        # ── 헬스 카드 ────────────────────────────────────────────
+        def hcard(label, v):
+            ok = v is not None and v >= 1
+            c  = "#10b981" if ok else ("#64748b" if v is None else "#ef4444")
+            t  = "Healthy" if ok else ("N/A" if v is None else "Unhealthy")
+            return (f"<div style='background:#111827;border:1px solid {c}33;border-radius:8px;"
+                    f"padding:12px;display:flex;align-items:center;gap:10px'>"
+                    f"<div style='width:10px;height:10px;border-radius:50%;background:{c};flex-shrink:0'></div>"
+                    f"<div><div style='font-size:10px;color:#64748b;margin-bottom:2px'>{label}</div>"
+                    f"<div style='font-weight:700;color:{c}'>{t}</div></div></div>")
+
+        # ── HTML 조립 ─────────────────────────────────────────────
+        vm_run = sum(1 for v in m.vms if v.status_group == "running")
+        vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
+        vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
+        vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
+
+        tbl_style = "width:100%;border-collapse:collapse;font-size:12px"
+        th_style  = "padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap"
+        td_style  = "padding:7px 10px;border-bottom:1px solid #0f172a"
+
+        html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AIBox Infrastructure Report — {escape(m.last_updated)}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#020817;color:#e2e8f0;font-family:"Segoe UI",sans-serif;padding:24px}}
+h1{{font-size:20px;font-weight:700;color:#fff;margin-bottom:4px}}
+h2{{font-size:13px;font-weight:700;color:#e2e8f0;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;
+    display:flex;align-items:center;gap:8px}}
+h2::before{{content:"";display:inline-block;width:3px;height:14px;background:#3b82f6;border-radius:2px}}
+.sec{{background:#0c1426;border:1px solid #1e3a5f22;border-radius:10px;padding:20px;margin-bottom:20px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}
+th{{padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;
+    color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap}}
+td{{padding:7px 10px;border-bottom:1px solid #0f172a}}
+tr:hover td{{background:rgba(59,130,246,.04)}}
+.grid{{display:grid;gap:12px}}
+.kpi{{background:#111827;border:1px solid #1e3a5f;border-radius:8px;padding:14px}}
+.kpi .l{{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#475569;margin-bottom:4px}}
+.kpi .v{{font-size:22px;font-weight:700;font-family:monospace}}
+</style>
+</head>
+<body>
+<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1e3a5f">
+  <h1>⬡ AIBox Infrastructure Report</h1>
+  <p style="color:#64748b;font-size:12px">OCP {escape(m.ocp_version)} &nbsp;·&nbsp; 생성: {escape(m.last_updated)} &nbsp;·&nbsp; 30초 자동 갱신</p>
+</div>
+
+<!-- KPI -->
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:20px">
+  <div class="kpi"><div class="l">Nodes</div><div class="v">{len(m.nodes)}</div></div>
+  <div class="kpi"><div class="l">VMs Total</div><div class="v">{len(m.vms)}</div></div>
+  <div class="kpi"><div class="l" style="color:#10b981">Running</div><div class="v" style="color:#10b981">{vm_run}</div></div>
+  <div class="kpi"><div class="l" style="color:#64748b">Stopped</div><div class="v" style="color:#64748b">{vm_stp}</div></div>
+  <div class="kpi"><div class="l" style="color:#f59e0b">Provisioning</div><div class="v" style="color:#f59e0b">{vm_prv}</div></div>
+  <div class="kpi"><div class="l" style="color:{"#ef4444" if vm_fai else "#64748b"}">Failed</div><div class="v" style="color:{"#ef4444" if vm_fai else "#64748b"}">{vm_fai}</div></div>
+  <div class="kpi"><div class="l">Cluster CPU</div><div class="v" style="color:{self._pct_color(h.cluster_cpu_pct)}">{self._fmt_pct(h.cluster_cpu_pct)}</div></div>
+  <div class="kpi"><div class="l">Cluster Mem</div><div class="v" style="color:{self._pct_color(h.cluster_memory_pct)}">{self._fmt_pct(h.cluster_memory_pct)}</div></div>
+  <div class="kpi"><div class="l" style="color:{"#ef4444" if h.firing_alerts else "#10b981"}">Firing Alerts</div><div class="v" style="color:{"#ef4444" if h.firing_alerts else "#10b981"}">{h.firing_alerts}</div></div>
+</div>
+
+<!-- Cluster Health -->
+<div class="sec">
+  <h2>Cluster Health</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+    {hcard("API Server", h.api_server)}
+    {hcard("ETCD", h.etcd)}
+    {hcard("CoreDNS", h.coredns)}
+    {hcard("ETCD Leader", h.etcd_leader)}
+  </div>
+</div>
+
+<!-- Infrastructure Services -->
+<div class="sec">
+  <h2>Infrastructure Services</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+    {svc_cards}
+  </div>
+</div>
+
+<!-- Cluster Operators -->
+<div class="sec">
+  <h2>Cluster Operators &nbsp;
+    <span style="font-size:11px;font-weight:400;color:#10b981">{ok_ops} OK</span>
+    {"&nbsp;<span style='font-size:11px;font-weight:700;color:#ef4444'>" + str(deg_ops) + " Degraded</span>" if deg_ops else ""}
+    {"&nbsp;<span style='font-size:11px;font-weight:700;color:#f59e0b'>" + str(prog_ops) + " Progressing</span>" if prog_ops else ""}
+  </h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">
+    {op_cells}
+  </div>
+</div>
+
+<!-- MachineConfigPool -->
+<div class="sec">
+  <h2>MachineConfigPool</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+    {mcp_html or "<p style='color:#64748b;font-size:12px'>데이터 없음</p>"}
+  </div>
+</div>
+
+<!-- Nodes -->
+<div class="sec">
+  <h2>Nodes ({len(m.nodes)})</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Roles</th><th>Status</th><th>Age</th>
+        <th>CPU (top)</th><th>CPU %</th><th>Memory (top)</th><th>Memory %</th>
+      </tr></thead>
+      <tbody>{node_rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Virtual Machines -->
+<div class="sec">
+  <h2>Virtual Machines ({len(m.vms)}) — 네임스페이스별</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Status</th><th>Node</th><th>IP</th>
+        <th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
+        <th>Net RX</th><th>Net TX</th><th>OS</th><th>Age</th>
+      </tr></thead>
+      <tbody>{vm_rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Storage -->
+<div class="sec">
+  <h2>Storage Pools (PV: {len(m.pv_data)}, PVC: {len(m.pvc_data)})</h2>
+  <div style="overflow-x:auto;margin-bottom:16px">
+    <table>
+      <thead><tr>
+        <th>Pool Name</th><th>Provisioner</th><th>PVs</th><th>PVCs</th>
+        <th>Total</th><th>Used</th><th>Usage</th>
+      </tr></thead>
+      <tbody>{pool_rows}</tbody>
+    </table>
+  </div>
+  <details>
+    <summary style="cursor:pointer;font-size:12px;color:#7dd3fc;margin-bottom:8px">
+      PersistentVolumes 상세 ({len(m.pv_data)}개) 펼치기
+    </summary>
+    <div style="overflow-x:auto;margin-top:8px">
+      <table>
+        <thead><tr><th>Name</th><th>Capacity</th><th>Status</th><th>StorageClass</th><th>Claim</th><th>Age</th></tr></thead>
+        <tbody>{"".join(
+            f"<tr><td style='font-family:monospace;font-size:11px'>{escape(p.get("Name",""))}</td>"
+            f"<td>{escape(p.get("Capacity",""))}</td>"
+            f"<td><span style='color:{"#10b981" if p.get("Status")=="Bound" else "#f59e0b"}'>{escape(p.get("Status",""))}</span></td>"
+            f"<td style='font-size:11px;color:#64748b'>{escape(p.get("StorageClass",""))}</td>"
+            f"<td style='font-size:11px;color:#94a3b8'>{escape(p.get("Claim",""))}</td>"
+            f"<td style='font-size:11px'>{escape(p.get("Age",""))}</td></tr>"
+            for p in m.pv_data
+        )}</tbody>
+      </table>
+    </div>
+  </details>
+</div>
+
+<div style="text-align:center;color:#334155;font-size:11px;margin-top:16px">
+  AIBox Unified Monitoring Portal v5 &nbsp;·&nbsp; {escape(m.last_updated)}
+</div>
+</body></html>"""
+
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info("HTML 리포트 생성 완료: %s (%d bytes)", report_file, len(html))
 
 # ════════════════════════════════════════════════════════════════════
 # 7. FASTAPI APPLICATION
