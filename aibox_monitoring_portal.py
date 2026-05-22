@@ -1034,34 +1034,75 @@ class MetricsCollector:
         return len(instant)
 
     def fetch_node_realtime(self) -> int:
-        if not self.metrics.nodes or not self._prom_strategy: return 0
-        test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
-        has_node = bool(test and test[0].get("metric", {}).get("node"))
-        ip_map: Dict[str, str] = {}
-        if not has_node:
-            for item in self._query("kube_node_info"):
-                lbl = item.get("metric", {})
-                if lbl.get("node") and lbl.get("internal_ip"):
-                    ip_map[lbl["internal_ip"]] = lbl["node"]
-        nrt: Dict[str, Dict[str, float]] = {}
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            futs = {
-                ex.submit(self._query, '(1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'): "cpu",
-                ex.submit(self._query, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'): "mem",
-            }
-            for fut in as_completed(futs):
-                k = futs[fut]
-                for item in fut.result():
+        """Prometheus 우선, 실패 시 oc top 명시적 fallback + data_source 추적"""
+        if not self.metrics.nodes:
+            return 0
+
+        success_count = 0
+
+        # 1. Prometheus 우선 시도 (기존 로직 최대한 유지)
+        try:
+            test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
+            has_node = bool(test and test[0].get("metric", {}).get("node"))
+            ip_map: Dict[str, str] = {}
+            if not has_node:
+                for item in self._query("kube_node_info"):
                     lbl = item.get("metric", {})
-                    name = lbl.get("node", "") or ip_map.get(lbl.get("instance", "").split(":")[0], "")
-                    if not name: continue
-                    try: nrt.setdefault(name, {})[k] = float(item["value"][1])
-                    except Exception: pass
-        for n in self.metrics.nodes:
-            d = nrt.get(n.name, {})
-            n.cpu_pct_realtime = d.get("cpu")
-            n.memory_pct_realtime = d.get("mem")
-        return len(nrt)
+                    if lbl.get("node") and lbl.get("internal_ip"):
+                        ip_map[lbl["internal_ip"]] = lbl["node"]
+
+            nrt: Dict[str, Dict[str, float]] = {}
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                futs = {
+                    ex.submit(self._query, '(1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'): "cpu",
+                    ex.submit(self._query, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'): "mem",
+                }
+                for fut in as_completed(futs):
+                    k = futs[fut]
+                    for item in fut.result():
+                        lbl = item.get("metric", {})
+                        name = lbl.get("node", "") or ip_map.get(lbl.get("instance", "").split(":")[0], "")
+                        if not name: continue
+                        try:
+                            nrt.setdefault(name, {})[k] = float(item["value"][1])
+                        except Exception:
+                            pass
+
+            # Prometheus 데이터 적용
+            for n in self.metrics.nodes:
+                d = nrt.get(n.name, {})
+                if d.get("cpu") is not None or d.get("mem") is not None:
+                    n.cpu_pct_realtime = d.get("cpu")
+                    n.memory_pct_realtime = d.get("mem")
+                    n.data_source = "prometheus"
+                    success_count += 1
+
+            if success_count > 0:
+                logger.info(f"Node realtime: Prometheus 성공 ({success_count} nodes)")
+                return success_count
+
+        except Exception as e:
+            logger.warning(f"Prometheus node realtime 실패: {e}")
+
+        # 2. oc top fallback
+        try:
+            cli_data = self._fetch_from_oc_top()
+            updated = 0
+            for node in self.metrics.nodes:
+                if node.name in cli_data:
+                    d = cli_data[node.name]
+                    node.cpu_pct_realtime = d.get("cpu")
+                    node.memory_pct_realtime = d.get("mem")
+                    node.data_source = "oc_top"
+                    updated += 1
+
+            if updated > 0:
+                logger.info(f"Node realtime: oc top fallback 적용 ({updated} nodes)")
+                return updated
+        except Exception as e:
+            logger.error(f"oc top fallback 실패: {e}")
+
+        return 0
 
 
     def _fetch_from_oc_top(self) -> dict:
@@ -1077,7 +1118,7 @@ class MetricsCollector:
 
             data = {}
             for line in result.stdout.strip().splitlines():
-                parts = re.split(r"\s+", line.strip())
+                parts = re.split(r'\s+', line.strip())
                 if len(parts) >= 5:
                     name = parts[0]
                     try:
@@ -1096,6 +1137,40 @@ class MetricsCollector:
         except Exception as e:
             logger.error(f"oc adm top nodes 실행 중 예외: {e}")
             return {}
+
+    def _fetch_from_oc_top(self) -> dict:
+        """oc adm top nodes fallback"""
+        try:
+            result = subprocess.run(
+                ["oc", "adm", "top", "nodes", "--no-headers"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                logger.error(f"oc adm top nodes 실패: {result.stderr.strip()}")
+                return {}
+
+            data = {}
+            for line in result.stdout.strip().splitlines():
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) >= 5:
+                    name = parts[0]
+                    try:
+                        cpu_str = parts[1].replace("m", "")
+                        cpu = float(cpu_str) / 10.0
+                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
+                        mem = float(mem_str)
+                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
+                    except Exception:
+                        continue
+            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
+            return data
+        except FileNotFoundError:
+            logger.error("oc 명령어를 찾을 수 없습니다.")
+            return {}
+        except Exception as e:
+            logger.error(f"oc adm top nodes 실행 중 예외: {e}")
+            return {}
+
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
         queries = {
