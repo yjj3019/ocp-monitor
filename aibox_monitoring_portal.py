@@ -1563,6 +1563,25 @@ class HTMLReportBuilder:
                     f"<div><div style='font-size:10px;color:#64748b;margin-bottom:2px'>{label}</div>"
                     f"<div style='font-weight:700;color:{c}'>{t}</div></div></div>")
 
+        # ── PV 행 (f-string 중첩 회피) ──────────────────────────────
+        pv_rows_html = ""
+        for p in m.pv_data:
+            n   = escape(p.get("Name",""))
+            cap = escape(p.get("Capacity",""))
+            st  = escape(p.get("Status",""))
+            sc  = escape(p.get("StorageClass",""))
+            cl  = escape(p.get("Claim",""))
+            ag  = escape(p.get("Age",""))
+            sc_c = "#10b981" if p.get("Status") == "Bound" else "#f59e0b"
+            pv_rows_html += (
+                f"<tr><td style='font-family:monospace;font-size:11px'>{n}</td>"
+                f"<td>{cap}</td>"
+                f"<td><span style='color:{sc_c}'>{st}</span></td>"
+                f"<td style='font-size:11px;color:#64748b'>{sc}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{cl}</td>"
+                f"<td style='font-size:11px'>{ag}</td></tr>"
+            )
+
         # ── HTML 조립 ─────────────────────────────────────────────
         vm_run = sum(1 for v in m.vms if v.status_group == "running")
         vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
@@ -1704,15 +1723,7 @@ tr:hover td{{background:rgba(59,130,246,.04)}}
     <div style="overflow-x:auto;margin-top:8px">
       <table>
         <thead><tr><th>Name</th><th>Capacity</th><th>Status</th><th>StorageClass</th><th>Claim</th><th>Age</th></tr></thead>
-        <tbody>{"".join(
-            f"<tr><td style='font-family:monospace;font-size:11px'>{escape(p.get("Name",""))}</td>"
-            f"<td>{escape(p.get("Capacity",""))}</td>"
-            f"<td><span style='color:{"#10b981" if p.get("Status")=="Bound" else "#f59e0b"}'>{escape(p.get("Status",""))}</span></td>"
-            f"<td style='font-size:11px;color:#64748b'>{escape(p.get("StorageClass",""))}</td>"
-            f"<td style='font-size:11px;color:#94a3b8'>{escape(p.get("Claim",""))}</td>"
-            f"<td style='font-size:11px'>{escape(p.get("Age",""))}</td></tr>"
-            for p in m.pv_data
-        )}</tbody>
+        <tbody>{pv_rows_html}</tbody>
       </table>
     </div>
   </details>
