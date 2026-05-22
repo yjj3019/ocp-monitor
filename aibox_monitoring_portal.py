@@ -1,4 +1,3 @@
-from node_manager import NodeDataManager
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -17,8 +16,9 @@ AIBox Unified Monitoring Portal — v5 (Unified Edition)
 """
 
 import os, sys, json, time, ssl, logging, sqlite3, threading, re, subprocess, urllib.parse, urllib.request
-
 import subprocess
+from dataclasses import asdict
+from node_manager import NodeDataManager
 
 class NodeDataManager:
     def __init__(self, prom_client=None):
@@ -1571,7 +1571,26 @@ def api_overview():
 @app.get("/api/v1/nodes")
 def api_nodes():
     cache = _engine.get_cache()
-    return JSONResponse({"nodes": cache.get("nodes", []), "last_updated": cache.get("last_updated")})
+    nodes = cache.get("nodes", [])
+
+    # NodeDataManager 인스턴스 생성 (prom 객체는 전역변수로 존재)
+    manager = NodeDataManager(prom_client=prom)
+
+    # 각 노드에 UI 컨텍스트 및 Fallback 데이터 주입
+    for n in nodes:
+        node_name = n.get("name") # 노드 이름 확인
+        snapshot = manager.fetch_node_realtime(node_name)
+        ui_ctx = manager.get_ui_context(snapshot)
+
+        # UI 배지 및 툴팁 정보 추가
+        n["ui"] = ui_ctx
+
+        # CLI fallback 데이터가 있다면 기존 값을 덮어씌움
+        if snapshot['is_cli'] and snapshot['data']:
+            n["cpu_usage"] = snapshot['data'].get('cpu', n.get("cpu_usage"))
+            n["memory_usage"] = snapshot['data'].get('mem', n.get("memory_usage"))
+
+    return JSONResponse({"nodes": nodes, "last_updated": cache.get("last_updated")})
 
 # ── VMs ───────────────────────────────────────────────────────────
 @app.get("/api/v1/vms")
