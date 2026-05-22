@@ -16,6 +16,42 @@ AIBox Unified Monitoring Portal — v5 (Unified Edition)
 """
 
 import os, sys, json, time, ssl, logging, sqlite3, threading, re, subprocess, urllib.parse, urllib.request
+
+import subprocess
+
+class NodeDataManager:
+    def __init__(self, prom_client=None):
+        self.prom = prom_client
+        self.default_net_msg = "환경 제약으로 수집 불가"
+        self.cli_command = ["oc", "adm", "top", "nodes"]
+        self.timeout = 5
+    def fetch_from_prometheus(self, node_name):
+        if not self.prom: return None
+        try:
+            return self.prom.custom_query(f'node_cpu_seconds_total{{instance="{node_name}"}}')
+        except: return None
+    def parse_oc_adm_top_nodes(self, node_name):
+        try:
+            result = subprocess.check_output(self.cli_command, text=True, timeout=self.timeout)
+            for line in result.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == node_name:
+                    return {"cpu": parts[1], "mem": parts[3], "status": "active"}
+        except: pass
+        return None
+    def fetch_node_realtime(self, node_name):
+        prom_data = self.fetch_from_prometheus(node_name)
+        if prom_data: return {"data": prom_data, "source": "Prometheus", "is_cli": False}
+        cli_data = self.parse_oc_adm_top_nodes(node_name)
+        return {"data": cli_data, "source": "CLI" if cli_data else "Unavailable", "is_cli": True}
+    def get_ui_context(self, node_snapshot):
+        is_cli = node_snapshot.get("source") == "CLI"
+        return {
+            "badge": "CLI" if is_cli else "Prometheus",
+            "show_time_series": not is_cli,
+            "net_info": self.default_net_msg if is_cli else "Real-time",
+            "tooltip": "데이터 소스: CLI (환경 제약 대체)" if is_cli else "데이터 소스: Prometheus"
+        }
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
