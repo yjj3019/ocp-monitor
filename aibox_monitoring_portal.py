@@ -1252,6 +1252,24 @@ class MetricsCollector:
                             nrt.setdefault(name, {})[k] = val
                     except Exception: pass
 
+        # ── NetObserv 노드 네트워크 ──────────────────────────────
+        netobserv_rx: dict = {}
+        netobserv_tx: dict = {}
+        try:
+            for item in self._query('sum by(SrcK8S_HostName)(rate(netobserv_node_ingress_bytes_total[5m]))'):
+                node = item.get("metric", {}).get("SrcK8S_HostName", "")
+                if node:
+                    try: netobserv_rx[node] = float(item["value"][1])
+                    except Exception: pass
+            for item in self._query('sum by(SrcK8S_HostName)(rate(netobserv_node_egress_bytes_total[5m]))'):
+                node = item.get("metric", {}).get("SrcK8S_HostName", "")
+                if node:
+                    try: netobserv_tx[node] = float(item["value"][1])
+                    except Exception: pass
+            if netobserv_rx:
+                logger.info("NetObserv 노드 네트워크: %d개 수집", len(netobserv_rx))
+        except Exception as e:
+            logger.debug("NetObserv 노드 쿼리 실패: %s", e)
         for n in self.metrics.nodes:
             d = nrt.get(n.name, {})
             # Prometheus 값 우선, 없으면 oc top 값 유지
@@ -1259,16 +1277,42 @@ class MetricsCollector:
                 n.cpu_pct_realtime = d["cpu"]
             if d.get("mem") is not None:
                 n.memory_pct_realtime = d["mem"]
-            n.net_rx_bps = d.get("net_rx")
-            n.net_tx_bps = d.get("net_tx")
+            n.net_rx_bps = netobserv_rx.get(n.name) or d.get("net_rx")
+            n.net_tx_bps = netobserv_tx.get(n.name) or d.get("net_tx")
 
-        logger.info("노드 실시간: %d개 수집 (net: %s)",
-                    len(nrt),
-                    "있음" if any("net_rx" in v for v in nrt.values()) else "없음")
+        logger.info("노드 수집 — CPU/MEM: Metrics API ✅ | Prometheus node-exporter: %d개(미노출 정상) | NetObserv Net: rx=%d tx=%d노드",
+                    len(nrt), len(netobserv_rx), len(netobserv_tx))
         return len(nrt)
 
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
+        # NetObserv workload 메트릭으로 VM 네트워크 보완
+        netobserv_vm_rx: dict = {}
+        netobserv_vm_tx: dict = {}
+        try:
+            for item in self._query(
+                'sum by(SrcK8S_Namespace,SrcK8S_OwnerName)'
+                '(rate(netobserv_workload_ingress_bytes_total[5m]))'
+            ):
+                m = item.get("metric", {})
+                key = (m.get("SrcK8S_Namespace",""), m.get("SrcK8S_OwnerName",""))
+                if key[0] and key[1]:
+                    try: netobserv_vm_rx[key] = float(item["value"][1])
+                    except Exception: pass
+            for item in self._query(
+                'sum by(SrcK8S_Namespace,SrcK8S_OwnerName)'
+                '(rate(netobserv_workload_egress_bytes_total[5m]))'
+            ):
+                m = item.get("metric", {})
+                key = (m.get("SrcK8S_Namespace",""), m.get("SrcK8S_OwnerName",""))
+                if key[0] and key[1]:
+                    try: netobserv_vm_tx[key] = float(item["value"][1])
+                    except Exception: pass
+            if netobserv_vm_rx:
+                logger.info("NetObserv VM 네트워크: %d개 수집", len(netobserv_vm_rx))
+        except Exception as e:
+            logger.debug("NetObserv VM 쿼리 실패: %s", e)
+
         queries = {
             "cpu_pct": "rate(kubevirt_vmi_cpu_usage_seconds_total[5m]) * 100",
             "mem_used": "kubevirt_vmi_memory_used_bytes",
@@ -1296,8 +1340,10 @@ class MetricsCollector:
             if ma > 0:
                 vm.memory_usage_pct = mu / ma * 100
                 vm.memory_used_bytes = int(mu)
-            vm.net_rx_bps = d.get("net_rx")
-            vm.net_tx_bps = d.get("net_tx")
+            # NetObserv 값 우선, 없으면 kubevirt 메트릭
+            vm_key = (vm.namespace, vm.name)
+            vm.net_rx_bps = netobserv_vm_rx.get(vm_key) or d.get("net_rx")
+            vm.net_tx_bps = netobserv_vm_tx.get(vm_key) or d.get("net_tx")
             vm.disk_read_bps = d.get("disk_r")
             vm.disk_write_bps = d.get("disk_w")
         return len(rt)
