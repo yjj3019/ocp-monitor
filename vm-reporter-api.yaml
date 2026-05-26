@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vm-metrics-collector
+  labels:
+    app.kubernetes.io/name: vm-metrics-collector
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vm-metrics-sa
+  namespace: vm-metrics-collector
+automountServiceAccountToken: false
+---
+# OCP 4.11+ 정적 토큰 Secret
+# 발급 후 토큰 확인: oc get secret vm-metrics-sa-token -n vm-metrics-collector -o jsonpath='{.data.token}' | base64 -d
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vm-metrics-sa-token
+  namespace: vm-metrics-collector
+  annotations:
+    kubernetes.io/service-account.name: vm-metrics-sa
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vm-metrics-api-reader
+rules:
+# 1. 메트릭스 API (oc adm top)
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+
+# 2. 코어 리소스
+- apiGroups: [""]
+  resources:
+  - "pods"
+  - "nodes"
+  - "services"
+  - "namespaces"
+  - "persistentvolumeclaims"
+  - "persistentvolumes"
+  - "secrets"         # SA 토큰 Secret 자체 조회용
+  verbs: ["get", "list"]
+
+# 3. 라우트 (Prometheus 엔드포인트 자동 탐색)
+- apiGroups: ["route.openshift.io"]
+  resources: ["routes"]
+  verbs: ["get", "list"]
+
+# 4. 가상머신 (OpenShift Virtualization)
+- apiGroups: ["kubevirt.io"]
+  resources: ["virtualmachines", "virtualmachineinstances"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["subresources.kubevirt.io"]
+  resources: ["virtualmachineinstances/guestosinfo"]
+  verbs: ["get"]
+
+# 5. 스토리지 클래스 (StoragePool 모니터링)
+# [v2] list verb 추가 (기존 get만 있었음)
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list"]
+---
+# KubeVirt + 코어 리소스 권한 바인딩
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vm-metrics-api-binding
+subjects:
+- kind: ServiceAccount
+  name: vm-metrics-sa
+  namespace: vm-metrics-collector
+roleRef:
+  kind: ClusterRole
+  name: vm-metrics-api-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# Prometheus/Thanos 메트릭 조회 권한 (cluster-monitoring-view)
+# 이 바인딩이 없으면 kubelet_volume_stats_*, node_cpu_seconds_total 등 수집 불가
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vm-metrics-monitoring-view-binding
+subjects:
+- kind: ServiceAccount
+  name: vm-metrics-sa
+  namespace: vm-metrics-collector
+roleRef:
+  kind: ClusterRole
+  name: cluster-monitoring-view
+  apiGroup: rbac.authorization.k8s.io
+---
+# [v2 신규] 사용자 워크로드 모니터링 조회 권한
+# kubevirt_vmi_* 메트릭이 user-workload-monitoring 네임스페이스에 있을 경우 필요
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vm-metrics-monitoring-edit-binding
+subjects:
+- kind: ServiceAccount
+  name: vm-metrics-sa
+  namespace: vm-metrics-collector
+roleRef:
+  kind: ClusterRole
+  name: monitoring-rules-view   # user-workload-monitoring 조회 전용 (편집 권한 없음)
+  apiGroup: rbac.authorization.k8s.io
+---
+# [권장] NetworkPolicy (Pod 배포 시 주석 해제)
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: vm-metrics-collector-netpol
+#   namespace: vm-metrics-collector
+# spec:
+#   podSelector:
+#     matchLabels:
+#       app: vm-metrics-collector
+#   policyTypes:
+#   - Ingress
+#   - Egress
+#   ingress: []
+#   egress:
+#   - ports:
+#     - port: 6443    # Kubernetes API Server
+#       protocol: TCP
+#     - port: 443     # Thanos Querier 라우트 (HTTPS)
+#       protocol: TCP
+#     - port: 22      # SCP 전송 대상 (100.100.100.10)
+#       protocol: TCP
