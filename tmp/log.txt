@@ -1,12 +1,16 @@
-[jjyoo@bastion:~]$ # 1. flowlogs-pipeline 로그에서 실제 에러 확인
-oc logs -n netobserv flowlogs-pipeline-495ms --tail=30
-Starting flowlogs-pipeline:
-=====
-Build version: unknown
-Build date: unknown
-
-Using configuration:
-{
+[jjyoo@bastion:~]$ # 포트 확인 (ss 대신 cat /proc/net/udp)
+oc exec -n netobserv flowlogs-pipeline-2gdfg -- \
+  cat /proc/net/udp 2>/dev/null | head -10
+echo "---"
+# 메트릭 확인
+oc exec -n netobserv flowlogs-pipeline-2gdfg -- \
+  wget -qO- "http://localhost:9401/metrics" 2>/dev/null | grep -E "netobserv|flow_" | head -20
+echo "---"
+# flowlogs-pipeline 로그 확인
+oc logs -n netobserv flowlogs-pipeline-2gdfg --tail=20
+   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+---
+---
     "PipeLine": "[{\"name\":\"grpc\"},{\"follows\":\"grpc\",\"name\":\"enrich\"},{\"follows\":\"enrich\",\"name\":\"subnets\"},{\"follows\":\"subnets\",\"name\":\"prometheus\"}]",
     "Parameters": "[{\"ingest\":{\"grpc\":{\"port\":2055},\"type\":\"grpc\"},\"name\":\"grpc\"},{\"name\":\"enrich\",\"transform\":{\"network\":{\"directioninfo\":{\"dsthostfield\":\"DstK8S_HostIP\",\"flowdirectionfield\":\"FlowDirection\",\"reporteripfield\":\"AgentIP\",\"srchostfield\":\"SrcK8S_HostIP\"},\"kubeconfig\":{\"trackedkinds\":[\"ReplicaSet\",\"Deployment\",\"Gateway\"]},\"rules\":[{\"kubernetes\":{\"interfacesfield\":\"Interfaces\",\"ipfield\":\"SrcAddr\",\"macfield\":\"SrcMac\",\"output\":\"SrcK8S\",\"udnsfield\":\"Udns\"},\"type\":\"add_kubernetes\"},{\"kubernetes\":{\"interfacesfield\":\"Interfaces\",\"ipfield\":\"DstAddr\",\"macfield\":\"DstMac\",\"output\":\"DstK8S\",\"udnsfield\":\"Udns\"},\"type\":\"add_kubernetes\"},{\"type\":\"reinterpret_direction\"},{\"decode_tcp_flags\":{\"input\":\"Flags\",\"output\":\"Flags\"},\"type\":\"decode_tcp_flags\"},{\"kubernetes_infra\":{\"infra_prefixes\":[\"netobserv\",\"openshift\"],\"infra_refs\":[{\"name\":\"kubernetes\",\"namespace\":\"default\"},{\"name\":\"openshift\",\"namespace\":\"default\"}],\"namespacenamefields\":[{\"name\":\"SrcK8S_Name\",\"namespace\":\"SrcK8S_Namespace\"},{\"name\":\"DstK8S_Name\",\"namespace\":\"DstK8S_Namespace\"}],\"output\":\"K8S_FlowLayer\"},\"type\":\"add_kubernetes_infra\"}]},\"type\":\"network\"}}]",
     "DynamicParameters": "{\"filename\":\"config.json\",\"name\":\"flowlogs-pipeline-config-dynamic\",\"namespace\":\"netobserv\"}",
@@ -19,33 +23,11 @@ Using configuration:
         "Port": 0
     }
 }
-time=2026-05-26T05:56:18Z level=info msg=StartServerAsync: addr = :9401 component=prometheus
-time=2026-05-26T05:56:18Z level=info msg=Starting GRPC server - no TLS component=ingest.GRPCProtobuf
-time=2026-05-26T05:56:18Z level=info msg=connecting stages: grpc --> enrich
-time=2026-05-26T05:56:18Z level=info msg=connecting stages: enrich --> subnets
-time=2026-05-26T05:56:18Z level=info msg=connecting stages: subnets --> prometheus
-time=2026-05-26T05:56:18Z level=info msg=Start watching config
-time=2026-05-26T05:56:18Z level=info msg=Received config update: {[{add_subnet_label <nil> <nil> <nil> <nil> 0xc00184b0e0 <nil> <nil>} {add_subnet_label <nil> <nil> <nil> <nil> 0xc00184b100 <nil> <nil>}] { [] [] []}   [{[10.0.0.0/16 100.64.0.0/16 100.88.0.0/16 169.254.0.0/17] Machines} {[10.128.0.0/14] Pods} {[172.30.0.0/16 100.10.110.100/32 100.10.110.101/32 100.10.110.102/32] Services}] {    }} component=transform.Filter
-time=2026-05-26T05:56:32Z level=info msg=Received config update: {<nil> [{node_egress_bytes_total counter Total bytes per node in egress direction [{FlowDirection 0 not_equal}] Bytes [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {node_ingress_bytes_total counter Total bytes per node in ingress direction [{FlowDirection 1 not_equal}] Bytes [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {node_ingress_packets_total counter Total packets per node in ingress direction [{FlowDirection 1 not_equal}] Packets [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {workload_egress_bytes_total counter Total bytes per workload in egress direction [{FlowDirection 0 not_equal}] Bytes [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_ingress_bytes_total counter Total bytes per workload in ingress direction [{FlowDirection 1 not_equal}] Bytes [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_egress_packets_total counter Total packets per workload in egress direction [{FlowDirection 0 not_equal}] Packets [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_ingress_packets_total counter Total packets per workload in ingress direction [{FlowDirection 1 not_equal}] Packets [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_flows_total counter Total flows per workload []  [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {node_to_node_ingress_flows_total counter Total ingress flows between nodes [{FlowDirection 2 not_equal} {SrcK8S_HostName  presence} {DstK8S_HostName  presence}]  [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0}] netobserv_ 0s 0} component=encode.Prometheus
-[jjyoo@bastion:~]$ # 2. FlowCollector에 IPFIX 소스 명시 추가
-oc patch flowcollector cluster --type=merge -p '{
-  "spec": {
-    "agent": {
-      "type": "IPFIX",
-      "ipfix": {
-        "sampling": 400,
-        "clusterNetworkOperator": {"namespace": "openshift-network-operator"},
-        "ovnKubernetes": {
-          "namespace": "openshift-ovn-kubernetes",
-          "daemonSetName": "ovnkube-node",
-          "containerName": "ovnkube-controller"
-        }
-      }
-    }
-  }
-}'
-
-sleep 30
-oc exec -n netobserv flowlogs-pipeline-495ms -- \
-  wget -qO- "http://localhost:9401/metrics" 2>/dev/null | grep "netobserv" | head -10
-flowcollector.flows.netobserv.io/cluster patched
+time=2026-05-26T06:07:53Z level=info msg=StartServerAsync: addr = :9401 component=prometheus
+time=2026-05-26T06:07:53Z level=info msg=Starting GRPC server - no TLS component=ingest.GRPCProtobuf
+time=2026-05-26T06:07:53Z level=info msg=connecting stages: grpc --> enrich
+time=2026-05-26T06:07:53Z level=info msg=connecting stages: enrich --> subnets
+time=2026-05-26T06:07:53Z level=info msg=connecting stages: subnets --> prometheus
+time=2026-05-26T06:07:53Z level=info msg=Start watching config
+time=2026-05-26T06:07:53Z level=info msg=Received config update: {[{add_subnet_label <nil> <nil> <nil> <nil> 0xc001853ee0 <nil> <nil>} {add_subnet_label <nil> <nil> <nil> <nil> 0xc001853f00 <nil> <nil>}] { [] [] []}   [{[10.0.0.0/16 100.64.0.0/16 100.88.0.0/16 169.254.0.0/17] Machines} {[10.128.0.0/14] Pods} {[172.30.0.0/16 100.10.110.100/32 100.10.110.101/32 100.10.110.102/32] Services}] {    }} component=transform.Filter
+time=2026-05-26T06:08:14Z level=info msg=Received config update: {<nil> [{node_egress_bytes_total counter Total bytes per node in egress direction [{FlowDirection 0 not_equal}] Bytes [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {node_ingress_bytes_total counter Total bytes per node in ingress direction [{FlowDirection 1 not_equal}] Bytes [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {node_ingress_packets_total counter Total packets per node in ingress direction [{FlowDirection 1 not_equal}] Packets [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0} {workload_egress_bytes_total counter Total bytes per workload in egress direction [{FlowDirection 0 not_equal}] Bytes [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_ingress_bytes_total counter Total bytes per workload in ingress direction [{FlowDirection 1 not_equal}] Bytes [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_egress_packets_total counter Total packets per workload in egress direction [{FlowDirection 0 not_equal}] Packets [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_ingress_packets_total counter Total packets per workload in ingress direction [{FlowDirection 1 not_equal}] Packets [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {workload_flows_total counter Total flows per workload []  [SrcK8S_Namespace DstK8S_Namespace K8S_FlowLayer SrcSubnetLabel DstSubnetLabel SrcK8S_OwnerName DstK8S_OwnerName SrcK8S_OwnerType DstK8S_OwnerType SrcK8S_Type DstK8S_Type] map[] [] [] 0} {node_to_node_ingress_flows_total counter Total ingress flows between nodes [{FlowDirection 2 not_equal} {SrcK8S_HostName  presence} {DstK8S_HostName  presence}]  [SrcK8S_HostName DstK8S_HostName] map[] [] [] 0}] netobserv_ 0s 0} component=encode.Prometheus
