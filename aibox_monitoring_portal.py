@@ -16,43 +16,6 @@ AIBox Unified Monitoring Portal — v5 (Unified Edition)
 """
 
 import os, sys, json, time, ssl, logging, sqlite3, threading, re, subprocess, urllib.parse, urllib.request
-import subprocess
-from dataclasses import asdict
-from node_manager import NodeDataManager
-
-class NodeDataManager:
-    def __init__(self, prom_client=None):
-        self.prom = prom_client
-        self.default_net_msg = "환경 제약으로 수집 불가"
-        self.cli_command = ["oc", "adm", "top", "nodes"]
-        self.timeout = 5
-    def fetch_from_prometheus(self, node_name):
-        if not self.prom: return None
-        try:
-            return self.prom.custom_query(f'node_cpu_seconds_total{{instance="{node_name}"}}')
-        except: return None
-    def parse_oc_adm_top_nodes(self, node_name):
-        try:
-            result = subprocess.check_output(self.cli_command, text=True, timeout=self.timeout)
-            for line in result.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 4 and parts[0] == node_name:
-                    return {"cpu": parts[1], "mem": parts[3], "status": "active"}
-        except: pass
-        return None
-    def fetch_node_realtime(self, node_name):
-        prom_data = self.fetch_from_prometheus(node_name)
-        if prom_data: return {"data": prom_data, "source": "Prometheus", "is_cli": False}
-        cli_data = self.parse_oc_adm_top_nodes(node_name)
-        return {"data": cli_data, "source": "CLI" if cli_data else "Unavailable", "is_cli": True}
-    def get_ui_context(self, node_snapshot):
-        is_cli = node_snapshot.get("source") == "CLI"
-        return {
-            "badge": "CLI" if is_cli else "Prometheus",
-            "show_time_series": not is_cli,
-            "net_info": self.default_net_msg if is_cli else "Real-time",
-            "tooltip": "데이터 소스: CLI (환경 제약 대체)" if is_cli else "데이터 소스: Prometheus"
-        }
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
@@ -361,6 +324,31 @@ class SQLiteManager:
                     latency_ms REAL, is_reachable INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_ppl_ts ON prometheus_ping_log(timestamp);
+
+                CREATE TABLE IF NOT EXISTS route_probe_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    route_name TEXT, namespace TEXT, host TEXT,
+                    status_code INTEGER, latency_ms REAL, is_up INTEGER,
+                    error_msg TEXT DEFAULT ""
+                );
+                CREATE INDEX IF NOT EXISTS idx_rph_ts ON route_probe_history(timestamp);
+
+                CREATE TABLE IF NOT EXISTS alert_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    alert_name TEXT, severity TEXT, namespace TEXT,
+                    state TEXT, summary TEXT, description TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_ah_ts ON alert_history(timestamp);
+
+                CREATE TABLE IF NOT EXISTS incidents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    title TEXT, severity TEXT, status TEXT DEFAULT "active",
+                    affected TEXT, description TEXT
+                );
             """)
         logger.info("SQLite DB initialized: %s", self.db_file)
 
@@ -488,6 +476,145 @@ class SQLiteManager:
                 seen_ts.add(ts)
             nodes.setdefault(r["node_name"], {})[ts] = r["vm_count"]
         return {"labels": labels, "nodes": {n: [d.get(l, 0) for l in labels] for n, d in nodes.items()}}
+
+    # ── Route probe ───────────────────────────────────────────
+    def store_route_probes(self, probes: List[Dict]) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            c = conn.cursor()
+            for p in probes:
+                c.execute(
+                    "INSERT INTO route_probe_history "
+                    "(timestamp,route_name,namespace,host,status_code,latency_ms,is_up,error_msg) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (now, p.get("name",""), p.get("namespace",""), p.get("host",""),
+                     p.get("status_code", 0), p.get("latency_ms", 0),
+                     int(p.get("is_up", 0)), p.get("error", "")),
+                )
+            c.execute("DELETE FROM route_probe_history WHERE timestamp <= ?", (cutoff,))
+
+    def get_route_slo(self, hours: int = 24) -> List[Dict]:
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT route_name, namespace, host, "
+                "COUNT(*) as total, SUM(is_up) as up_count, "
+                "AVG(latency_ms) as avg_latency, "
+                "MIN(latency_ms) as min_latency, MAX(latency_ms) as max_latency "
+                "FROM route_probe_history WHERE timestamp > ? "
+                "GROUP BY route_name, namespace, host",
+                (cutoff,)
+            ).fetchall()
+        result = []
+        for r in rows:
+            total = r["total"] or 1
+            result.append({
+                "name": r["route_name"], "namespace": r["namespace"], "host": r["host"],
+                "total_probes": total, "up_count": r["up_count"] or 0,
+                "slo_pct": round((r["up_count"] or 0) / total * 100, 2),
+                "avg_latency_ms": round(r["avg_latency"] or 0, 1),
+                "min_latency_ms": round(r["min_latency"] or 0, 1),
+                "max_latency_ms": round(r["max_latency"] or 0, 1),
+            })
+        return sorted(result, key=lambda x: x["slo_pct"])
+
+    def get_route_trend(self, route_name: str, hours: int = 1) -> Dict:
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, latency_ms, is_up, status_code FROM route_probe_history "
+                "WHERE route_name=? AND timestamp > ? ORDER BY timestamp ASC",
+                (route_name, cutoff)
+            ).fetchall()
+        return {
+            "labels": [r["timestamp"][11:16] for r in rows],
+            "latency": [r["latency_ms"] for r in rows],
+            "is_up": [r["is_up"] for r in rows],
+            "status_code": [r["status_code"] for r in rows],
+        }
+
+    # ── Alert history ─────────────────────────────────────────
+    def store_alerts(self, alerts: List[Dict]) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            c = conn.cursor()
+            for a in alerts:
+                c.execute(
+                    "INSERT INTO alert_history "
+                    "(timestamp,alert_name,severity,namespace,state,summary,description) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (now, a.get("alertname",""), a.get("severity","none"),
+                     a.get("namespace","cluster"), a.get("alertstate","firing"),
+                     a.get("summary","")[:200], a.get("description","")[:300]),
+                )
+            c.execute("DELETE FROM alert_history WHERE timestamp <= ?", (cutoff,))
+
+    def get_alert_history_trend(self, hours: int = 1) -> Dict:
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, COUNT(*) as cnt, "
+                "SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END) as crit "
+                "FROM alert_history WHERE timestamp > ? "
+                "GROUP BY substr(timestamp,1,16) ORDER BY timestamp ASC",
+                (cutoff,)
+            ).fetchall()
+        return {
+            "labels": [r["timestamp"][11:16] for r in rows],
+            "total": [r["cnt"] for r in rows],
+            "critical": [r["crit"] for r in rows],
+        }
+
+    # ── Incidents ─────────────────────────────────────────────
+    def upsert_incident(self, title: str, severity: str, affected: str, desc: str) -> int:
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM incidents WHERE title=? AND status='active'", (title,)
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            c = conn.cursor()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            c.execute(
+                "INSERT INTO incidents (started_at,title,severity,status,affected,description) "
+                "VALUES (?,?,?,?,?,?)",
+                (now, title, severity, "active", affected, desc)
+            )
+            return c.lastrowid
+
+    def resolve_incident(self, title: str) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.cursor().execute(
+                "UPDATE incidents SET status='resolved', resolved_at=? WHERE title=? AND status='active'",
+                (now, title)
+            )
+
+    def get_incidents(self, limit: int = 20) -> List[Dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_node_trend(self, node_name: str, hours: int = 1) -> Dict[str, Any]:
+        """node_metrics_history에서 노드별 CPU/MEM 시계열 반환 (oc top 기반)"""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, cpu_pct, mem_pct FROM node_metrics_history "
+                "WHERE node_name=? AND timestamp > ? ORDER BY timestamp ASC",
+                (node_name, cutoff),
+            ).fetchall()
+        labels = [r["timestamp"][11:16] for r in rows]
+        cpu    = [r["cpu_pct"] for r in rows]
+        mem    = [r["mem_pct"] for r in rows]
+        return {"labels": labels, "cpu": cpu, "mem": mem,
+                "source": "sqlite_cli", "node": node_name,
+                "point_count": len(rows)}
 
     def get_infra_trend(self, hours: int = 1) -> Dict[str, Any]:
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -791,7 +918,13 @@ class MetricsCollector:
             nu: Dict[str, Dict[str, str]] = {}
             for line in top.split("\n"):
                 p = line.split()
-                if len(p) >= 5: nu[p[0]] = {"cpu": p[2], "mem": p[4]}
+                if len(p) >= 5:
+                    try: cpu_pct_val = float(p[2].rstrip("%"))
+                    except Exception: cpu_pct_val = None
+                    try: mem_pct_val = float(p[4].rstrip("%"))
+                    except Exception: mem_pct_val = None
+                    nu[p[0]] = {"cpu": p[1], "mem": p[3],
+                                "cpu_pct": cpu_pct_val, "mem_pct": mem_pct_val}
             nj = self._run(["oc", "get", "nodes", "-o", "json"])
             if not nj: return 0
             tc = 0
@@ -807,10 +940,13 @@ class MetricsCollector:
                 tc += cap_b
                 usage = nu.get(name, {"cpu": "N/A", "mem": "N/A"})
                 nodes.append(NodeMetrics(
-                    name=name, cpu_usage=usage["cpu"], memory_usage=usage["mem"],
+                    name=name, cpu_usage=usage.get("cpu","N/A"),
+                    memory_usage=usage.get("mem","N/A"),
                     status=status, roles=roles,
                     age=self._fmt_age(node["metadata"]["creationTimestamp"]),
                     memory_bytes=cap_b,
+                    cpu_pct_realtime=usage.get("cpu_pct"),
+                    memory_pct_realtime=usage.get("mem_pct"),
                 ))
             self.metrics.nodes = nodes
             self.metrics.global_memory_total = self._fmt_bytes(tc)
@@ -949,9 +1085,9 @@ class MetricsCollector:
                 queries[key] = f'min(up{{job="{matched[cat]}"}}) by ()'
         queries.update({
             "leader": "min(etcd_server_has_leader) by ()",
-            "alerts": 'count(ALERTS{alertstate="firing"}) or vector(0)',
-            "cpu": '(1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100',
-            "mem": '(1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100',
+            "alerts": 'count(ALERTS{alertstate="firing",alertname!="Watchdog",alertname!~"InfoInhibitor.*"}) or vector(0)',
+            "cpu": 'clamp_min((1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)',
+            "mem": 'clamp_min((1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100, 0)',
         })
         with ThreadPoolExecutor(max_workers=max(len(queries), 1)) as ex:
             futs = {ex.submit(self._query, q): k for k, q in queries.items()}
@@ -1071,142 +1207,65 @@ class MetricsCollector:
         return len(instant)
 
     def fetch_node_realtime(self) -> int:
-        """Prometheus 우선, 실패 시 oc top 명시적 fallback + data_source 추적"""
-        if not self.metrics.nodes:
-            return 0
+        if not self.metrics.nodes or not self._prom_strategy: return 0
+        test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
+        has_node = bool(test and test[0].get("metric", {}).get("node"))
 
-        success_count = 0
+        # node_network_* 는 node 레이블 없이 instance(IP) 만 있는 경우 대비
+        test_net = self._query('count by(node) (node_network_receive_bytes_total{device="eth0"})')
+        has_node_net = bool(test_net and test_net[0].get("metric", {}).get("node"))
 
-        # 1. Prometheus 우선 시도 (기존 로직 최대한 유지)
-        try:
-            test = self._query('count by(node) (node_cpu_seconds_total{mode="idle"})')
-            has_node = bool(test and test[0].get("metric", {}).get("node"))
-            ip_map: Dict[str, str] = {}
-            if not has_node:
-                for item in self._query("kube_node_info"):
+        ip_map: Dict[str, str] = {}
+        if not has_node or not has_node_net:
+            for item in self._query("kube_node_info"):
+                lbl = item.get("metric", {})
+                if lbl.get("node") and lbl.get("internal_ip"):
+                    ip_map[lbl["internal_ip"]] = lbl["node"]
+            logger.info("노드 IP 매핑: %d개", len(ip_map))
+
+        # 네트워크 필터: lo, veth, ovn, br, cali 제외
+        NET_EXCL = "lo|veth.*|ovn.*|br-.*|cali.*|tunl.*|flannel.*"
+        queries: Dict[str, str] = {
+            "cpu": 'clamp_min((1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100, 0)',
+            "mem": 'clamp_min((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100, 0)',
+            "net_rx": f'sum by(node,instance) (rate(node_network_receive_bytes_total{{device!~"{NET_EXCL}"}}[5m]))',
+            "net_tx": f'sum by(node,instance) (rate(node_network_transmit_bytes_total{{device!~"{NET_EXCL}"}}[5m]))',
+        }
+        nrt: Dict[str, Dict[str, float]] = {}
+        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                for item in fut.result():
                     lbl = item.get("metric", {})
-                    if lbl.get("node") and lbl.get("internal_ip"):
-                        ip_map[lbl["internal_ip"]] = lbl["node"]
-
-            nrt: Dict[str, Dict[str, float]] = {}
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                futs = {
-                    ex.submit(self._query, '(1 - avg by(instance,node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'): "cpu",
-                    ex.submit(self._query, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'): "mem",
-                }
-                for fut in as_completed(futs):
-                    k = futs[fut]
-                    for item in fut.result():
-                        lbl = item.get("metric", {})
-                        name = lbl.get("node", "") or ip_map.get(lbl.get("instance", "").split(":")[0], "")
-                        if not name: continue
-                        try:
-                            nrt.setdefault(name, {})[k] = float(item["value"][1])
-                        except Exception:
-                            pass
-
-            # Prometheus 데이터 적용
-            for n in self.metrics.nodes:
-                d = nrt.get(n.name, {})
-                if d.get("cpu") is not None or d.get("mem") is not None:
-                    n.cpu_pct_realtime = d.get("cpu")
-                    n.memory_pct_realtime = d.get("mem")
-                    n.data_source = "prometheus"
-                    success_count += 1
-
-            if success_count > 0:
-                logger.info(f"Node realtime: Prometheus 성공 ({success_count} nodes)")
-                return success_count
-
-        except Exception as e:
-            logger.warning(f"Prometheus node realtime 실패: {e}")
-
-        # 2. oc top fallback
-        try:
-            cli_data = self._fetch_from_oc_top()
-            updated = 0
-            for node in self.metrics.nodes:
-                if node.name in cli_data:
-                    d = cli_data[node.name]
-                    node.cpu_pct_realtime = d.get("cpu")
-                    node.memory_pct_realtime = d.get("mem")
-                    node.data_source = "oc_top"
-                    updated += 1
-
-            if updated > 0:
-                logger.info(f"Node realtime: oc top fallback 적용 ({updated} nodes)")
-                return updated
-        except Exception as e:
-            logger.error(f"oc top fallback 실패: {e}")
-
-        return 0
-
-
-    def _fetch_from_oc_top(self) -> dict:
-        """oc adm top nodes fallback"""
-        try:
-            result = subprocess.run(
-                ["oc", "adm", "top", "nodes", "--no-headers"],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode != 0:
-                logger.error(f"oc adm top nodes 실패: {result.stderr.strip()}")
-                return {}
-
-            data = {}
-            for line in result.stdout.strip().splitlines():
-                parts = re.split(r'\s+', line.strip())
-                if len(parts) >= 5:
-                    name = parts[0]
+                    name = (lbl.get("node", "")
+                            or ip_map.get(lbl.get("instance", "").split(":")[0], ""))
+                    if not name: continue
                     try:
-                        cpu_str = parts[1].replace("m", "")
-                        cpu = float(cpu_str) / 10.0
-                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
-                        mem = float(mem_str)
-                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
-                    except Exception:
-                        continue
-            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
-            return data
-        except FileNotFoundError:
-            logger.error("oc 명령어를 찾을 수 없습니다.")
-            return {}
-        except Exception as e:
-            logger.error(f"oc adm top nodes 실행 중 예외: {e}")
-            return {}
+                        val = float(item["value"][1])
+                        import math
+                        if math.isnan(val) or math.isinf(val): continue
+                        # 같은 노드에서 여러 device 합산 (net_rx/tx)
+                        if k in ("net_rx", "net_tx"):
+                            nrt.setdefault(name, {})[k] = nrt.get(name, {}).get(k, 0) + val
+                        else:
+                            nrt.setdefault(name, {})[k] = val
+                    except Exception: pass
 
-    def _fetch_from_oc_top(self) -> dict:
-        """oc adm top nodes fallback"""
-        try:
-            result = subprocess.run(
-                ["oc", "adm", "top", "nodes", "--no-headers"],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode != 0:
-                logger.error(f"oc adm top nodes 실패: {result.stderr.strip()}")
-                return {}
+        for n in self.metrics.nodes:
+            d = nrt.get(n.name, {})
+            # Prometheus 값 우선, 없으면 oc top 값 유지
+            if d.get("cpu") is not None:
+                n.cpu_pct_realtime = d["cpu"]
+            if d.get("mem") is not None:
+                n.memory_pct_realtime = d["mem"]
+            n.net_rx_bps = d.get("net_rx")
+            n.net_tx_bps = d.get("net_tx")
 
-            data = {}
-            for line in result.stdout.strip().splitlines():
-                parts = re.split(r'\s+', line.strip())
-                if len(parts) >= 5:
-                    name = parts[0]
-                    try:
-                        cpu_str = parts[1].replace("m", "")
-                        cpu = float(cpu_str) / 10.0
-                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
-                        mem = float(mem_str)
-                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
-                    except Exception:
-                        continue
-            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
-            return data
-        except FileNotFoundError:
-            logger.error("oc 명령어를 찾을 수 없습니다.")
-            return {}
-        except Exception as e:
-            logger.error(f"oc adm top nodes 실행 중 예외: {e}")
-            return {}
+        logger.info("노드 실시간: %d개 수집 (net: %s)",
+                    len(nrt),
+                    "있음" if any("net_rx" in v for v in nrt.values()) else "없음")
+        return len(nrt)
 
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
@@ -1218,28 +1277,6 @@ class MetricsCollector:
             "net_tx": "rate(kubevirt_vmi_network_transmit_bytes_total[5m])",
             "disk_r": "rate(kubevirt_vmi_storage_read_traffic_bytes_total[5m])",
             "disk_w": "rate(kubevirt_vmi_storage_write_traffic_bytes_total[5m])",
-
-            data = {}
-            for line in result.stdout.strip().splitlines():
-                parts = re.split(r"\s+", line.strip())
-                if len(parts) >= 5:
-                    name = parts[0]
-                    try:
-                        cpu_str = parts[1].replace("m", "")
-                        cpu = float(cpu_str) / 10.0
-                        mem_str = parts[3].replace("Mi", "").replace("Gi", "")
-                        mem = float(mem_str)
-                        data[name] = {"cpu": round(cpu, 1), "mem": round(mem, 1)}
-                    except Exception:
-                        continue
-            logger.info(f"oc adm top nodes 성공: {len(data)} nodes")
-            return data
-        except FileNotFoundError:
-            logger.error("oc 명령어를 찾을 수 없습니다. OpenShift CLI가 설치되어 있는지 확인하세요.")
-            return {}
-        except Exception as e:
-            logger.error(f"oc adm top nodes 실행 중 예외 발생: {e}")
-            return {}
         }
         rt: Dict[Tuple[str, str], Dict[str, float]] = {}
         with ThreadPoolExecutor(max_workers=len(queries)) as ex:
@@ -1308,6 +1345,10 @@ class MetricsCollector:
             ("node_realtime", self.fetch_node_realtime),
             ("vm_realtime", self.fetch_vm_realtime),
             ("perf_trends", self.fetch_perf_trends),
+            ("pvc_disk_stats", self.fetch_pvc_disk_stats),
+            ("alerts_detail", self.fetch_alerts_detail),
+            ("route_probes", self.fetch_route_probes),
+            ("uwm_status", self.fetch_uwm_status),
         ]
         results = []
         for name, fn in steps:
@@ -1321,6 +1362,296 @@ class MetricsCollector:
             elif vm.status_group == "stopped": m.vm_stopped_count += 1
             elif vm.status_group == "failed": m.vm_failed_count += 1
         return results
+
+    def fetch_pvc_disk_stats(self) -> int:
+        """VM별 PVC 실제 디스크 사용량 수집 (kubelet_volume_stats)"""
+        if not self._prom_strategy: return 0
+        queries = {
+            "used":     "kubelet_volume_stats_used_bytes",
+            "capacity": "kubelet_volume_stats_capacity_bytes",
+        }
+        ps: Dict[str, Dict[str, int]] = {}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                for item in fut.result():
+                    lbl = item.get("metric", {})
+                    pvc = lbl.get("persistentvolumeclaim", "")
+                    ns  = lbl.get("namespace", "")
+                    if not pvc: continue
+                    key = f"{ns}/{pvc}"
+                    try: ps.setdefault(key, {})[k] = int(float(item["value"][1]))
+                    except Exception: pass
+        self.metrics.pvc_disk_stats = ps
+        # VM별 총 디스크 사용량 계산
+        for vm in self.metrics.vms:
+            total_used = 0
+            for vol in vm.volumes:
+                pvc = vol.get("pvc", "")
+                if pvc and pvc != "N/A":
+                    key = f"{vm.namespace}/{pvc}"
+                    total_used += ps.get(key, {}).get("used", 0)
+            vm.memory_used_bytes = vm.memory_used_bytes  # 기존 유지
+            # disk_used_bytes를 net_rx_bps 재사용 대신 별도 필드로 저장
+            # volumes[0]에 disk_used 주입
+            for vol in vm.volumes:
+                pvc = vol.get("pvc", "")
+                if pvc and pvc != "N/A":
+                    key = f"{vm.namespace}/{pvc}"
+                    vol["used_bytes"] = ps.get(key, {}).get("used", 0)
+                    vol["capacity_bytes"] = ps.get(key, {}).get("capacity", 0)
+            vm._disk_used_bytes = total_used  # type: ignore[attr-defined]
+        return len(ps)
+
+
+    def query_node_trends(self, node_name: str, hours: int = 1) -> Dict[str, Any]:
+        """노드별 on-demand 시계열 (CPU/Mem/Net/Disk)"""
+        if not self._prom_strategy:
+            return {}
+        end_ts = int(time.time())
+        start_ts = end_ts - hours * 3600
+        step = "2m" if hours <= 1 else "5m"
+        n = node_name.replace('"', '')
+
+        queries = {
+            "cpu":    f'clamp_min((1 - avg by(node) (rate(node_cpu_seconds_total{{mode="idle",node="{n}"}}[5m]))) * 100, 0)',
+            "mem":    f'clamp_min((1 - node_memory_MemAvailable_bytes{{node="{n}"}} / node_memory_MemTotal_bytes{{node="{n}"}}) * 100, 0)',
+            "net_rx": f'sum by(node) (rate(node_network_receive_bytes_total{{node="{n}",device!~"lo|veth.*|ovn.*|br.*"}}[5m]))',
+            "net_tx": f'sum by(node) (rate(node_network_transmit_bytes_total{{node="{n}",device!~"lo|veth.*|ovn.*|br.*"}}[5m]))',
+            "disk_r": f'sum by(node) (rate(node_disk_read_bytes_total{{node="{n}"}}[5m]))',
+            "disk_w": f'sum by(node) (rate(node_disk_written_bytes_total{{node="{n}"}}[5m]))',
+        }
+        result: Dict[str, Any] = {"labels": []}
+        import urllib.parse as _up
+        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+            futs = {ex.submit(self._query_range, q): k for k, q in queries.items()}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                vals, lbls = fut.result()
+                import math
+                vals = [None if (v is None or math.isnan(v) or math.isinf(v)) else v for v in vals]
+                result[k] = vals
+                if lbls and not result["labels"]:
+                    result["labels"] = lbls
+        return result
+
+    def query_vm_trends(self, vm_name: str, namespace: str, hours: int = 1) -> Dict[str, Any]:
+        """VM별 on-demand 시계열 (CPU/Mem/Net/Disk)"""
+        if not self._prom_strategy:
+            return {}
+        n = vm_name.replace('"', '')
+        ns = namespace.replace('"', '')
+
+        queries = {
+            "cpu":    f'rate(kubevirt_vmi_cpu_usage_seconds_total{{name="{n}",namespace="{ns}"}}[5m]) * 100',
+            "mem_pct":f'clamp_min(kubevirt_vmi_memory_used_bytes{{name="{n}",namespace="{ns}"}} / kubevirt_vmi_memory_available_bytes{{name="{n}",namespace="{ns}"}} * 100, 0)',
+            "net_rx": f'rate(kubevirt_vmi_network_receive_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
+            "net_tx": f'rate(kubevirt_vmi_network_transmit_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
+            "disk_r": f'rate(kubevirt_vmi_storage_read_traffic_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
+            "disk_w": f'rate(kubevirt_vmi_storage_write_traffic_bytes_total{{name="{n}",namespace="{ns}"}}[5m])',
+        }
+        result: Dict[str, Any] = {"labels": []}
+        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+            futs = {ex.submit(self._query_range, q): k for k, q in queries.items()}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                vals, lbls = fut.result()
+                import math
+                vals = [None if (v is None or math.isnan(v) or math.isinf(v)) else v for v in vals]
+                result[k] = vals
+                if lbls and not result["labels"]:
+                    result["labels"] = lbls
+        return result
+
+    def query_node_conditions(self) -> List[Dict]:
+        """kube_node_status_condition 기반 노드별 상세 상태"""
+        conditions = ["Ready", "MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"]
+        result: Dict[str, Dict] = {}
+        with ThreadPoolExecutor(max_workers=len(conditions)) as ex:
+            futs = {
+                ex.submit(self._query,
+                    f'kube_node_status_condition{{condition="{c}",status="true"}}'): c
+                for c in conditions
+            }
+            for fut in as_completed(futs):
+                cond = futs[fut]
+                for item in fut.result():
+                    node = item.get("metric", {}).get("node", "")
+                    if not node: continue
+                    try:
+                        val = float(item["value"][1])
+                    except Exception:
+                        val = 0
+                    result.setdefault(node, {})[cond] = val
+        return [
+            {
+                "node": node,
+                "ready":               int(conds.get("Ready", 0)),
+                "memory_pressure":     int(conds.get("MemoryPressure", 0)),
+                "disk_pressure":       int(conds.get("DiskPressure", 0)),
+                "pid_pressure":        int(conds.get("PIDPressure", 0)),
+                "network_unavailable": int(conds.get("NetworkUnavailable", 0)),
+            }
+            for node, conds in sorted(result.items())
+        ]
+
+    # ─────────────────────────────────────────────────────────
+    # 알럿 상세 수집
+    # ─────────────────────────────────────────────────────────
+    def fetch_alerts_detail(self) -> List[Dict]:
+        """ALERTS 메트릭에서 firing 알럿 상세 목록 수집"""
+        if not self._prom_strategy:
+            return []
+        results = self._query(
+            'ALERTS{alertstate="firing",alertname!="Watchdog",alertname!~"InfoInhibitor.*"}'
+        )
+        alerts = []
+        for item in results:
+            lbl = item.get("metric", {})
+            ann = lbl  # Thanos는 annotation을 label에 포함하기도 함
+            alerts.append({
+                "alertname":   lbl.get("alertname", "Unknown"),
+                "severity":    lbl.get("severity", "none"),
+                "namespace":   lbl.get("namespace", lbl.get("exported_namespace", "cluster")),
+                "alertstate":  lbl.get("alertstate", "firing"),
+                "service":     lbl.get("service", ""),
+                "pod":         lbl.get("pod", ""),
+                "node":        lbl.get("node", ""),
+                "summary":     lbl.get("summary", ""),
+                "description": lbl.get("description", ""),
+            })
+        # severity 순서: critical > warning > info > none
+        sev_order = {"critical": 0, "warning": 1, "info": 2, "none": 3}
+        alerts.sort(key=lambda a: (sev_order.get(a["severity"], 4), a["alertname"]))
+        self.metrics._alerts_detail = alerts
+        return alerts
+
+    # ─────────────────────────────────────────────────────────
+    # Route HTTP probe
+    # ─────────────────────────────────────────────────────────
+    def fetch_route_probes(self) -> List[Dict]:
+        """oc get routes + HTTP probe로 각 Route 가용성/응답시간 측정"""
+        import ssl, urllib.request, urllib.error
+        raw = self._run(["oc", "get", "routes", "-A", "-o", "json"], timeout=20)
+        if not raw:
+            return []
+        try:
+            items = json.loads(raw).get("items", [])
+        except Exception:
+            return []
+
+        # probe 함수
+        def _probe(host: str, timeout: int = 5) -> Dict:
+            url = f"https://{host}"
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            t0 = time.time()
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "AIBox-Monitor/1.0"})
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+                    latency = (time.time() - t0) * 1000
+                    return {"status_code": resp.status, "latency_ms": latency, "is_up": True, "error": ""}
+            except urllib.error.HTTPError as e:
+                latency = (time.time() - t0) * 1000
+                # 4xx도 route는 살아있음
+                return {"status_code": e.code, "latency_ms": latency, "is_up": e.code < 500, "error": ""}
+            except Exception as e:
+                latency = (time.time() - t0) * 1000
+                return {"status_code": 0, "latency_ms": latency, "is_up": False, "error": str(e)[:80]}
+
+        # 주요 시스템 route 제외 (모니터링 자체 etc)
+        SKIP_NS = {"openshift-monitoring", "openshift-logging", "openshift-tracing"}
+        routes_to_probe = []
+        for item in items:
+            ns = item["metadata"]["namespace"]
+            name = item["metadata"]["name"]
+            host = item.get("spec", {}).get("host", "")
+            if not host or ns in SKIP_NS:
+                continue
+            routes_to_probe.append({"name": name, "namespace": ns, "host": host})
+
+        results = []
+        with ThreadPoolExecutor(max_workers=min(len(routes_to_probe), 10)) as ex:
+            futs = {ex.submit(_probe, r["host"]): r for r in routes_to_probe}
+            for fut in as_completed(futs):
+                r = futs[fut]
+                try:
+                    probe_result = fut.result()
+                except Exception as e:
+                    probe_result = {"status_code": 0, "latency_ms": 0, "is_up": False, "error": str(e)}
+                results.append({**r, **probe_result})
+
+        self.metrics._route_probes = results
+        logger.info("Route probe: %d개 (up=%d)", len(results), sum(1 for r in results if r["is_up"]))
+        return results
+
+    # ─────────────────────────────────────────────────────────
+    # User Workload Monitoring 감지
+    # ─────────────────────────────────────────────────────────
+    def fetch_uwm_status(self) -> Dict:
+        """User Workload Monitoring 활성화 여부 및 상태 확인"""
+        uwm = {"enabled": False, "prometheus_count": 0, "user_rules_count": 0, "targets": []}
+        # UWM Prometheus 파드 확인
+        raw = self._run(
+            ["oc", "get", "pods", "-n", "openshift-user-workload-monitoring",
+             "-o", "jsonpath={.items[*].metadata.name}"], timeout=10, silent=True
+        )
+        if raw:
+            pods = raw.split()
+            uwm["enabled"] = True
+            uwm["prometheus_count"] = len([p for p in pods if "prometheus" in p])
+        # UWM 수집 대상 (Prometheus 통해)
+        if self._prom_strategy and uwm["enabled"]:
+            targets = self._query('count by(namespace) (up{namespace!~"openshift-.*"})')
+            uwm["targets"] = [
+                {"namespace": t.get("metric", {}).get("namespace", ""), "count": int(float(t["value"][1]))}
+                for t in targets if t.get("metric", {}).get("namespace")
+            ]
+        self.metrics._uwm_status = uwm
+        return uwm
+
+    # ─────────────────────────────────────────────────────────
+    # Incident 자동 감지
+    # ─────────────────────────────────────────────────────────
+    def detect_incidents(self, db) -> List[Dict]:
+        """알럿 + 노드 상태 기반 인시던트 자동 감지 및 SQLite 기록"""
+        incidents_detected = []
+        alerts = getattr(self.metrics, "_alerts_detail", [])
+        nodes = self.metrics.nodes
+        routes = getattr(self.metrics, "_route_probes", [])
+
+        # Rule 1: Critical 알럿 → 인시던트
+        for a in alerts:
+            if a["severity"] == "critical":
+                title = f"[CRITICAL] {a['alertname']}"
+                affected = a.get("namespace") or a.get("node") or "cluster"
+                db.upsert_incident(title, "critical", affected, a.get("description", ""))
+                incidents_detected.append(title)
+
+        # Rule 2: 노드 NotReady
+        for n in nodes:
+            if n.status != "Ready":
+                title = f"[NODE] {n.name} NotReady"
+                db.upsert_incident(title, "critical", n.name, f"노드 {n.name} 상태 이상: {n.status}")
+                incidents_detected.append(title)
+
+        # Rule 3: Route 다운 (5분 연속 실패)
+        for r in routes:
+            if not r.get("is_up") and r.get("latency_ms", 0) > 0:
+                title = f"[ROUTE] {r['name']} Down"
+                db.upsert_incident(title, "warning", r["namespace"], f"{r['host']} 응답 없음")
+                incidents_detected.append(title)
+
+        # 해소된 인시던트 resolve
+        active = db.get_incidents(50)
+        for inc in active:
+            if inc["status"] == "active":
+                if inc["title"] not in incidents_detected:
+                    db.resolve_incident(inc["title"])
+
+        return incidents_detected
 
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """FastAPI가 소비할 JSON-직렬화 가능 스냅샷 반환"""
@@ -1357,9 +1688,12 @@ class MetricsCollector:
                     "cpu_usage": n.cpu_usage, "mem_usage": n.memory_usage,
                     "cpu_pct": n.cpu_pct_realtime, "mem_pct": n.memory_pct_realtime,
                     "memory_bytes": n.memory_bytes,
+                    "net_rx_bps": getattr(n,"net_rx_bps",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
                 }
                 for n in m.nodes
             ],
+            "node_data_source": getattr(m, "_node_data_source", "cli"),
+            "node_net_available": getattr(m, "_node_net_available", False),
             "vms": [
                 {
                     "name": vm.name, "namespace": vm.namespace, "status": vm.status,
@@ -1369,6 +1703,7 @@ class MetricsCollector:
                     "cpu_pct": vm.cpu_usage_pct, "mem_pct": vm.memory_usage_pct,
                     "net_rx_bps": vm.net_rx_bps, "net_tx_bps": vm.net_tx_bps,
                     "disk_r_bps": vm.disk_read_bps, "disk_w_bps": vm.disk_write_bps,
+                    "disk_used_bytes": getattr(vm, "_disk_used_bytes", 0),
                     "volumes": vm.volumes,
                 }
                 for vm in m.vms
@@ -1387,8 +1722,28 @@ class MetricsCollector:
                     }
                     for p in m.storage_pools.values()
                 ],
-                "pvs": m.pv_data,
-                "pvcs": m.pvc_data,
+                "pvs": [
+                    {**p, "capacity_bytes": MetricsCollector._parse_bytes(p.get("Capacity", "0"))}
+                    for p in m.pv_data
+                ],
+                "pvcs": [
+                    {
+                        **p,
+                        "used_bytes": m.pvc_disk_stats.get(
+                            f"{p.get('Namespace','')}/{p.get('Name','')}", {}
+                        ).get("used", 0),
+                        "capacity_bytes": m.pvc_disk_stats.get(
+                            f"{p.get('Namespace','')}/{p.get('Name','')}", {}
+                        ).get("capacity", 0),
+                    }
+                    for p in m.pvc_data
+                ],
+                "pvc_vm_map": {
+                    f"{vm.namespace}/{vol.get('pvc','')}": vm.name
+                    for vm in m.vms
+                    for vol in vm.volumes
+                    if vol.get("pvc") and vol.get("pvc") != "N/A"
+                },
             },
             "infra": {
                 "router": {
@@ -1454,9 +1809,13 @@ class PollingEngine:
                 elif vm.status_group == "provisioning": m.vm_provisioning_count += 1
                 elif vm.status_group == "failed": m.vm_failed_count += 1
             with self._cache_lock:
-                self._cache = self.collector.get_metrics_snapshot()
+                self._cache = _sanitize_json(self.collector.get_metrics_snapshot())
             self._update_prom_status(*self.collector.ping_prometheus())
             logger.info("초기 수집 완료 — nodes=%d vms=%d", len(m.nodes), len(m.vms))
+            try:
+                HTMLReportBuilder().build(m, REPORT_HTML)
+            except Exception as e:
+                logger.warning("초기 HTML 리포트 생성 실패: %s", e)
         except Exception as e:
             logger.error("초기 수집 실패: %s", e)
 
@@ -1493,6 +1852,24 @@ class PollingEngine:
             with self._cache_lock:
                 self._cache = self.collector.get_metrics_snapshot()
 
+            # 알럿/Route SQLite 저장 + Incident 감지
+            try:
+                alerts = getattr(self.collector.metrics, "_alerts_detail", [])
+                if alerts:
+                    self.db.store_alerts(alerts)
+                routes = getattr(self.collector.metrics, "_route_probes", [])
+                if routes:
+                    self.db.store_route_probes(routes)
+                self.collector.detect_incidents(self.db)
+            except Exception as e:
+                logger.warning("Alert/Route/Incident 저장 실패: %s", e)
+
+            # HTML 리포트 생성 (Full Report 탭용)
+            try:
+                HTMLReportBuilder().build(self.collector.metrics, REPORT_HTML)
+            except Exception as e:
+                logger.warning("HTML 리포트 생성 실패: %s", e)
+
             logger.info("--- Polling cycle #%d 완료 (%.0fms, %s) ---", cycle_id, duration_ms, status)
 
             elapsed = time.time() - t0
@@ -1512,9 +1889,445 @@ class PollingEngine:
         with self._cache_lock:
             return dict(self._cache)
 
+
+# ════════════════════════════════════════════════════════════════════
+# 6b. HTML REPORT BUILDER  (vm_metrics_report.py 기능 통합)
+# ════════════════════════════════════════════════════════════════════
+class HTMLReportBuilder:
+    """
+    수집된 SystemMetrics를 받아 vm_metrics_report.py 스타일의
+    정적 HTML 리포트를 생성한다.
+    """
+
+    @staticmethod
+    def _fmt_bytes(b: int) -> str:
+        if b == 0: return "0 B"
+        names = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+        v, i = float(b), 0
+        while v >= 1024 and i < len(names) - 1: v /= 1024.0; i += 1
+        return f"{v:.2f} {names[i]}"
+
+    @staticmethod
+    def _fmt_pct(v) -> str:
+        return f"{v:.1f}%" if v is not None else "N/A"
+
+    @staticmethod
+    def _pct_color(v) -> str:
+        if v is None: return "#64748b"
+        if v < 70: return "#10b981"
+        if v < 90: return "#f59e0b"
+        return "#ef4444"
+
+    @staticmethod
+    def _pct_bar(v, label="") -> str:
+        c = HTMLReportBuilder._pct_color(v)
+        w = f"{min(v,100):.1f}" if v is not None else "0"
+        txt = HTMLReportBuilder._fmt_pct(v)
+        return (f"<div style='margin-bottom:6px'>"
+                f"<div style='display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-bottom:2px'>"
+                f"<span>{escape(label)}</span><span style='color:{c};font-weight:700'>{txt}</span></div>"
+                f"<div style='background:#1e293b;border-radius:3px;height:5px;overflow:hidden'>"
+                f"<div style='background:{c};height:5px;border-radius:3px;width:{w}%'></div></div></div>")
+
+    @staticmethod
+    def _status_badge(sg: str) -> str:
+        m = {"running": ("#10b981","Running"), "stopped": ("#64748b","Stopped"),
+             "provisioning": ("#f59e0b","Provisioning"), "failed": ("#ef4444","Failed"),
+             "unknown": ("#475569","Unknown")}
+        c, t = m.get(sg, ("#475569","Unknown"))
+        return (f"<span style='background:{c}22;color:{c};border:1px solid {c}55;"
+                f"padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700'>{t}</span>")
+
+    def build(self, m: SystemMetrics, report_file: str = REPORT_HTML) -> None:
+        h = m.cluster_health
+        im = m.infra
+
+        # ── 클러스터 오퍼레이터 요약 ──────────────────────────────
+        ok_ops  = sum(1 for o in im.cluster_operators if o.available and not o.degraded)
+        deg_ops = sum(1 for o in im.cluster_operators if o.degraded)
+        prog_ops= sum(1 for o in im.cluster_operators if o.progressing and not o.degraded)
+
+        op_cells = ""
+        for op in sorted(im.cluster_operators,
+                         key=lambda o: (not o.degraded, not o.progressing, o.name)):
+            if op.degraded:      c, dot = "#ef4444", "#ef4444"
+            elif op.progressing: c, dot = "#f59e0b", "#f59e0b"
+            elif op.available:   c, dot = "#10b981", "#10b981"
+            else:                c, dot = "#64748b", "#64748b"
+            tip = escape(op.message[:120]) if op.message else ""
+            op_cells += (
+                f"<div title='{tip}' style='background:#1e293b;border:1px solid #1e3a5f;border-radius:6px;"
+                f"padding:7px 9px;'>"
+                f"<div style='display:flex;align-items:center;gap:5px;margin-bottom:2px'>"
+                f"<div style='width:7px;height:7px;border-radius:50%;background:{dot};flex-shrink:0'></div>"
+                f"<span style='font-size:11px;font-weight:600;color:#e2e8f0;white-space:nowrap;"
+                f"overflow:hidden;text-overflow:ellipsis'>{escape(op.name)}</span></div>"
+                f"<div style='font-size:10px;color:{c};padding-left:12px;font-family:monospace'>{escape(op.version)}</div>"
+                f"</div>"
+            )
+
+        # ── 노드 행 ─────────────────────────────────────────────
+        node_rows = ""
+        for n in m.nodes:
+            sc = "#10b981" if n.status == "Ready" else "#ef4444"
+            node_rows += (
+                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(n.name)}</td>"
+                f"<td><span style='background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:3px;"
+                f"font-size:10px'>{escape(n.roles)}</span></td>"
+                f"<td><span style='color:{sc}'>{escape(n.status)}</span></td>"
+                f"<td>{escape(n.age)}</td>"
+                f"<td style='font-family:monospace'>{escape(n.cpu_usage)}</td>"
+                f"<td>{self._pct_bar(n.cpu_pct_realtime)}</td>"
+                f"<td style='font-family:monospace'>{escape(n.memory_usage)}</td>"
+                f"<td>{self._pct_bar(n.memory_pct_realtime)}</td></tr>"
+            )
+
+        # ── VM 행 ────────────────────────────────────────────────
+        vm_rows = ""
+        prev_ns = None
+        for vm in sorted(m.vms, key=lambda v: (v.namespace, v.name)):
+            if vm.namespace != prev_ns:
+                prev_ns = vm.namespace
+                vm_rows += (
+                    f"<tr><td colspan='12' style='background:#0f172a;color:#7dd3fc;"
+                    f"font-size:11px;font-weight:700;padding:6px 10px;border-top:2px solid #1e3a5f'>"
+                    f"📁 {escape(vm.namespace)}</td></tr>"
+                )
+            net_rx = f"{vm.net_rx_bps/1024:.1f} KB/s" if vm.net_rx_bps else "—"
+            net_tx = f"{vm.net_tx_bps/1024:.1f} KB/s" if vm.net_tx_bps else "—"
+            vm_rows += (
+                f"<tr><td style='color:#67e8f9;font-family:monospace'>{escape(vm.name)}</td>"
+                f"<td>{self._status_badge(vm.status_group)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{escape(vm.node)}</td>"
+                f"<td style='font-size:11px'>{escape(vm.ip_address)}</td>"
+                f"<td style='text-align:center'>{escape(vm.cpu_cores)}</td>"
+                f"<td>{self._pct_bar(vm.cpu_usage_pct)}</td>"
+                f"<td style='font-size:11px'>{escape(vm.memory_total)}</td>"
+                f"<td>{self._pct_bar(vm.memory_usage_pct)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{net_rx}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{net_tx}</td>"
+                f"<td style='font-size:11px;color:#64748b'>{escape(vm.os_info[:30])}</td>"
+                f"<td style='font-size:11px'>{escape(vm.creation_time)}</td></tr>"
+            )
+
+        # ── 스토리지 풀 행 ───────────────────────────────────────
+        pool_rows = ""
+        for p in m.storage_pools.values():
+            used_pct = p.used_capacity_bytes / p.total_capacity_bytes * 100 if p.total_capacity_bytes else 0
+            pool_rows += (
+                f"<tr><td style='color:#67e8f9'>{escape(p.name)}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{escape(p.provisioner)}</td>"
+                f"<td style='text-align:center'>{p.pv_count}</td>"
+                f"<td style='text-align:center'>{p.pvc_count}</td>"
+                f"<td>{self._fmt_bytes(p.total_capacity_bytes)}</td>"
+                f"<td>{self._fmt_bytes(p.used_capacity_bytes)}</td>"
+                f"<td>{self._pct_bar(used_pct)}</td></tr>"
+            )
+
+        # ── 인프라 서비스 카드 ───────────────────────────────────
+        def svc_card(title, color, items):
+            rows = "".join(
+                f"<div style='display:flex;justify-content:space-between;padding:5px 0;"
+                f"border-bottom:1px solid #1e293b'>"
+                f"<span style='font-size:11px;color:#64748b'>{l}</span>"
+                f"<span style='font-size:12px;font-weight:700;color:{vc}'>{v}</span></div>"
+                for l, v, vc in items
+            )
+            return (
+                f"<div style='background:#111827;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden'>"
+                f"<div style='background:{color}11;padding:8px 12px;border-bottom:1px solid {color}33'>"
+                f"<span style='font-size:11px;font-weight:700;color:#e2e8f0;letter-spacing:.05em'>{title}</span></div>"
+                f"<div style='padding:8px 12px'>{rows}</div></div>"
+            )
+
+        svc_cards = svc_card("INGRESS ROUTER", "#06b6d4", [
+            ("Req/s",    f"{im.router_req_rate:.1f}/s" if im.router_req_rate is not None else "N/A", "#06b6d4"),
+            ("4xx/s",    f"{im.router_4xx_rate:.2f}/s" if im.router_4xx_rate is not None else "N/A", "#f59e0b"),
+            ("5xx/s",    f"{im.router_5xx_rate:.2f}/s" if im.router_5xx_rate is not None else "N/A", "#ef4444"),
+            ("Sessions", str(int(im.router_sessions)) if im.router_sessions is not None else "N/A", "#3b82f6"),
+        ])
+
+        sc_pend = im.sched_pending
+        sc_c    = "#ef4444" if sc_pend and sc_pend > 10 else "#10b981"
+        svc_cards += svc_card("SCHEDULER", "#a78bfa", [
+            ("Pending Pods", str(int(sc_pend)) if sc_pend is not None else "N/A", sc_c),
+        ])
+        ovn_ok = im.ovn_nb_leader is not None and im.ovn_nb_leader >= 1
+        svc_cards += svc_card("OVN-KUBERNETES", "#2dd4bf", [
+            ("Logical Ports", str(int(im.ovn_ports)) if im.ovn_ports is not None else "N/A", "#2dd4bf"),
+            ("NB DB Leader",  "Leader" if ovn_ok else "N/A", "#10b981" if ovn_ok else "#64748b"),
+        ])
+        svc_cards += svc_card("IMAGE REGISTRY", "#34d399", [
+            ("Req/s", f"{im.reg_req_rate:.2f}/s" if im.reg_req_rate is not None else "N/A", "#34d399"),
+        ])
+
+        # ── MCP 카드 ─────────────────────────────────────────────
+        mcp_html = ""
+        for p in im.mcp_pools:
+            dg = p.degraded_count > 0
+            ok_all = p.ready_count == p.machine_count and p.machine_count > 0
+            bc = "#ef4444" if dg else ("#10b981" if ok_all else "#f59e0b")
+            dg_color = "#ef4444" if dg else "#64748b"
+            st = "Degraded" if dg else ("Ready" if ok_all else "Updating")
+            mcp_html += (
+                f"<div style='background:#111827;border:1px solid {bc}33;border-radius:8px;padding:12px'>"
+                f"<div style='display:flex;justify-content:space-between;margin-bottom:8px'>"
+                f"<span style='font-weight:700;color:#e2e8f0'>{escape(p.name)}</span>"
+                f"<span style='font-size:11px;font-weight:700;color:{bc}'>{st}</span></div>"
+                f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:4px'>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Total</div><div style='font-weight:700'>{p.machine_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Ready</div><div style='font-weight:700;color:#10b981'>{p.ready_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Updated</div><div style='font-weight:700;color:#06b6d4'>{p.updated_count}</div></div>"
+                f"<div style='text-align:center;background:#0f172a;border-radius:4px;padding:5px'>"
+                f"<div style='font-size:9px;color:#64748b'>Degraded</div>"
+                f"<div style='font-weight:700;color:{dg_color}'>{p.degraded_count}</div></div>"
+                f"</div></div>"
+            )
+
+        # ── 헬스 카드 ────────────────────────────────────────────
+        def hcard(label, v):
+            ok = v is not None and v >= 1
+            c  = "#10b981" if ok else ("#64748b" if v is None else "#ef4444")
+            t  = "Healthy" if ok else ("N/A" if v is None else "Unhealthy")
+            return (f"<div style='background:#111827;border:1px solid {c}33;border-radius:8px;"
+                    f"padding:12px;display:flex;align-items:center;gap:10px'>"
+                    f"<div style='width:10px;height:10px;border-radius:50%;background:{c};flex-shrink:0'></div>"
+                    f"<div><div style='font-size:10px;color:#64748b;margin-bottom:2px'>{label}</div>"
+                    f"<div style='font-weight:700;color:{c}'>{t}</div></div></div>")
+
+        # ── HTML 조립 ─────────────────────────────────────────────
+        fail_c  = "#ef4444" if sum(1 for v in m.vms if v.status_group == "failed") else "#64748b"
+        alert_c = "#ef4444" if h.firing_alerts else "#10b981"
+        vm_run = sum(1 for v in m.vms if v.status_group == "running")
+        vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
+        vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
+        vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
+
+        tbl_style = "width:100%;border-collapse:collapse;font-size:12px"
+        th_style  = "padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap"
+        td_style  = "padding:7px 10px;border-bottom:1px solid #0f172a"
+
+        # ── HTML 템플릿 (f-string 대신 변수 치환 — Python 3.11 호환) ──────
+        TMPL = """<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AIBox Infrastructure Report &mdash; __LAST_UPDATED__</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#020817;color:#e2e8f0;font-family:"Segoe UI",sans-serif;padding:24px}
+h1{font-size:20px;font-weight:700;color:#fff;margin-bottom:4px}
+h2{font-size:13px;font-weight:700;color:#e2e8f0;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+h2::before{content:"";display:inline-block;width:3px;height:14px;background:#3b82f6;border-radius:2px}
+.sec{background:#0c1426;border:1px solid rgba(30,58,95,.13);border-radius:10px;padding:20px;margin-bottom:20px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#475569;border-bottom:1px solid #1e3a5f;white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid #0f172a}
+tr:hover td{background:rgba(59,130,246,.04)}
+.grid{display:grid;gap:12px}
+.kpi{background:#111827;border:1px solid #1e3a5f;border-radius:8px;padding:14px}
+.kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#475569;margin-bottom:4px}
+.kpi .v{font-size:22px;font-weight:700;font-family:monospace}
+details summary{cursor:pointer;font-size:12px;color:#7dd3fc;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1e3a5f">
+  <h1>&#11042; AIBox Infrastructure Report</h1>
+  <p style="color:#64748b;font-size:12px">OCP __OCP_VER__ &nbsp;&middot;&nbsp; __LAST_UPDATED__ &nbsp;&middot;&nbsp; 30s auto-refresh</p>
+</div>
+
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:20px">
+  <div class="kpi"><div class="l">Nodes</div><div class="v">__NODES__</div></div>
+  <div class="kpi"><div class="l">VMs Total</div><div class="v">__VMS__</div></div>
+  <div class="kpi"><div class="l" style="color:#10b981">Running</div><div class="v" style="color:#10b981">__VM_RUN__</div></div>
+  <div class="kpi"><div class="l" style="color:#64748b">Stopped</div><div class="v" style="color:#64748b">__VM_STP__</div></div>
+  <div class="kpi"><div class="l" style="color:#f59e0b">Provisioning</div><div class="v" style="color:#f59e0b">__VM_PRV__</div></div>
+  <div class="kpi"><div class="l" style="color:__FAIL_C__">Failed</div><div class="v" style="color:__FAIL_C__">__VM_FAI__</div></div>
+  <div class="kpi"><div class="l">Cluster CPU</div><div class="v" style="color:__CPU_C__">__CPU__</div></div>
+  <div class="kpi"><div class="l">Cluster Mem</div><div class="v" style="color:__MEM_C__">__MEM__</div></div>
+  <div class="kpi"><div class="l" style="color:__ALERT_C__">Firing Alerts</div><div class="v" style="color:__ALERT_C__">__ALERTS__</div></div>
+</div>
+
+<div class="sec">
+  <h2>Cluster Health</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+    __HEALTH_CARDS__
+  </div>
+</div>
+
+<div class="sec">
+  <h2>Infrastructure Services</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+    __SVC_CARDS__
+  </div>
+</div>
+
+<div class="sec">
+  <h2>Cluster Operators &nbsp;
+    <span style="font-size:11px;font-weight:400;color:#10b981">__OK_OPS__ OK</span>
+    __DEG_BADGE____PROG_BADGE__
+  </h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">
+    __OP_CELLS__
+  </div>
+</div>
+
+<div class="sec">
+  <h2>MachineConfigPool</h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+    __MCP_HTML__
+  </div>
+</div>
+
+<div class="sec">
+  <h2>Nodes (__NODE_COUNT__)</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Roles</th><th>Status</th><th>Age</th>
+        <th>CPU (top)</th><th>CPU %</th><th>Memory (top)</th><th>Memory %</th>
+      </tr></thead>
+      <tbody>__NODE_ROWS__</tbody>
+    </table>
+  </div>
+</div>
+
+<div class="sec">
+  <h2>Virtual Machines (__VM_COUNT__)</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Status</th><th>Node</th><th>IP</th>
+        <th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
+        <th>Net RX</th><th>Net TX</th><th>OS</th><th>Age</th>
+      </tr></thead>
+      <tbody>__VM_ROWS__</tbody>
+    </table>
+  </div>
+</div>
+
+<div class="sec">
+  <h2>Storage Pools (PV: __PV_COUNT__, PVC: __PVC_COUNT__)</h2>
+  <div style="overflow-x:auto;margin-bottom:16px">
+    <table>
+      <thead><tr>
+        <th>Pool Name</th><th>Provisioner</th><th>PVs</th><th>PVCs</th>
+        <th>Total</th><th>Used</th><th>Usage %</th>
+      </tr></thead>
+      <tbody>__POOL_ROWS__</tbody>
+    </table>
+  </div>
+  <details>
+    <summary>PersistentVolumes (__PV_COUNT__&#xAC1C;) &#xD3BC;&#xCE58;&#xAE30;</summary>
+    <div style="overflow-x:auto;margin-top:8px">
+      <table>
+        <thead><tr><th>Name</th><th>Capacity</th><th>Status</th><th>StorageClass</th><th>Claim</th><th>Age</th></tr></thead>
+        <tbody>__PV_ROWS__</tbody>
+      </table>
+    </div>
+  </details>
+</div>
+
+<div style="text-align:center;color:#334155;font-size:11px;margin-top:16px">
+  AIBox Unified Monitoring Portal v5 &nbsp;&middot;&nbsp; __LAST_UPDATED__
+</div>
+</body></html>"""
+
+        # ── pv_rows_html 생성 ───────────────────────────────────
+        pv_rows_html = ""
+        for pv in m.pv_data:
+            pv_n   = escape(pv.get("Name",""))
+            pv_cap = escape(pv.get("Capacity",""))
+            pv_st  = escape(pv.get("Status",""))
+            pv_scn = escape(pv.get("StorageClass",""))
+            pv_cl  = escape(pv.get("Claim",""))
+            pv_ag  = escape(pv.get("Age",""))
+            pv_c   = "#10b981" if pv.get("Status") == "Bound" else "#f59e0b"
+            pv_rows_html += (
+                "<tr>"
+                f"<td style='font-family:monospace;font-size:11px'>{pv_n}</td>"
+                f"<td>{pv_cap}</td>"
+                f"<td><span style='color:{pv_c}'>{pv_st}</span></td>"
+                f"<td style='font-size:11px;color:#64748b'>{pv_scn}</td>"
+                f"<td style='font-size:11px;color:#94a3b8'>{pv_cl}</td>"
+                f"<td style='font-size:11px'>{pv_ag}</td>"
+                "</tr>"
+            )
+
+        # ── 치환값 계산 ──────────────────────────────────────────
+        vm_run = sum(1 for v in m.vms if v.status_group == "running")
+        vm_stp = sum(1 for v in m.vms if v.status_group == "stopped")
+        vm_prv = sum(1 for v in m.vms if v.status_group == "provisioning")
+        vm_fai = sum(1 for v in m.vms if v.status_group == "failed")
+        fail_c  = "#ef4444" if vm_fai  else "#64748b"
+        alert_c = "#ef4444" if h.firing_alerts else "#10b981"
+
+        replacements = {
+            "__LAST_UPDATED__": escape(m.last_updated),
+            "__OCP_VER__":      escape(m.ocp_version),
+            "__NODES__":        str(len(m.nodes)),
+            "__VMS__":          str(len(m.vms)),
+            "__VM_RUN__":       str(vm_run),
+            "__VM_STP__":       str(vm_stp),
+            "__VM_PRV__":       str(vm_prv),
+            "__VM_FAI__":       str(vm_fai),
+            "__FAIL_C__":       fail_c,
+            "__ALERT_C__":      alert_c,
+            "__CPU_C__":        self._pct_color(h.cluster_cpu_pct),
+            "__MEM_C__":        self._pct_color(h.cluster_memory_pct),
+            "__CPU__":          self._fmt_pct(h.cluster_cpu_pct),
+            "__MEM__":          self._fmt_pct(h.cluster_memory_pct),
+            "__ALERTS__":       str(h.firing_alerts),
+            "__HEALTH_CARDS__": (
+                hcard("API Server", h.api_server) +
+                hcard("ETCD",       h.etcd) +
+                hcard("CoreDNS",    h.coredns) +
+                hcard("ETCD Leader",h.etcd_leader)
+            ),
+            "__SVC_CARDS__":    svc_cards,
+            "__OK_OPS__":       str(ok_ops),
+            "__DEG_BADGE__":    (f"<span style='font-size:11px;font-weight:700;color:#ef4444'>&nbsp;{deg_ops} Degraded</span>" if deg_ops else ""),
+            "__PROG_BADGE__":   (f"<span style='font-size:11px;font-weight:700;color:#f59e0b'>&nbsp;{prog_ops} Progressing</span>" if prog_ops else ""),
+            "__OP_CELLS__":     op_cells,
+            "__MCP_HTML__":     mcp_html or "<p style='color:#64748b;font-size:12px'>No data</p>",
+            "__NODE_COUNT__":   str(len(m.nodes)),
+            "__NODE_ROWS__":    node_rows,
+            "__VM_COUNT__":     str(len(m.vms)),
+            "__VM_ROWS__":      vm_rows,
+            "__PV_COUNT__":     str(len(m.pv_data)),
+            "__PVC_COUNT__":    str(len(m.pvc_data)),
+            "__POOL_ROWS__":    pool_rows,
+            "__PV_ROWS__":      pv_rows_html,
+        }
+
+        html = TMPL
+        for placeholder, value in replacements.items():
+            html = html.replace(placeholder, value)
+
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info("HTML 리포트 생성 완료: %s (%d bytes)", report_file, len(html))
+
 # ════════════════════════════════════════════════════════════════════
 # 7. FASTAPI APPLICATION
 # ════════════════════════════════════════════════════════════════════
+
+def _sanitize_json(obj):
+    """inf/nan 등 JSON 비호환 float → None 재귀 치환"""
+    import math
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
 app = FastAPI(title="AIBox Unified Monitoring Portal", version="5.0")
 app.add_middleware(
     CORSMiddleware,
@@ -1565,32 +2378,13 @@ def api_overview():
     cache = _engine.get_cache()
     if not cache:
         return JSONResponse({**_EMPTY_SKELETON})
-    return JSONResponse({**cache, "is_collecting": False})
+    return JSONResponse(_sanitize_json({**cache, "is_collecting": False}))
 
 # ── Nodes ─────────────────────────────────────────────────────────
 @app.get("/api/v1/nodes")
 def api_nodes():
     cache = _engine.get_cache()
-    nodes = cache.get("nodes", [])
-
-    # NodeDataManager 인스턴스 생성 (prom 객체는 전역변수로 존재)
-    manager = NodeDataManager(prom_client=prom)
-
-    # 각 노드에 UI 컨텍스트 및 Fallback 데이터 주입
-    for n in nodes:
-        node_name = n.get("name") # 노드 이름 확인
-        snapshot = manager.fetch_node_realtime(node_name)
-        ui_ctx = manager.get_ui_context(snapshot)
-
-        # UI 배지 및 툴팁 정보 추가
-        n["ui"] = ui_ctx
-
-        # CLI fallback 데이터가 있다면 기존 값을 덮어씌움
-        if snapshot['is_cli'] and snapshot['data']:
-            n["cpu_usage"] = snapshot['data'].get('cpu', n.get("cpu_usage"))
-            n["memory_usage"] = snapshot['data'].get('mem', n.get("memory_usage"))
-
-    return JSONResponse({"nodes": nodes, "last_updated": cache.get("last_updated")})
+    return JSONResponse({"nodes": cache.get("nodes", []), "last_updated": cache.get("last_updated")})
 
 # ── VMs ───────────────────────────────────────────────────────────
 @app.get("/api/v1/vms")
@@ -1685,6 +2479,75 @@ def api_collector_health():
         "database": db_stats,
         "prometheus_ping_history": ping_hist,
     })
+
+
+# ── Node Trends (on-demand) ───────────────────────────────────────
+@app.get("/api/v1/nodes/{node_name}/trends")
+def api_node_trends(node_name: str, hours: int = Query(1, ge=1, le=24)):
+    data = _collector.query_node_trends(node_name, hours)
+    return JSONResponse(_sanitize_json(data))
+
+# ── Node SQLite Trends (CLI fallback) ────────────────────────────
+@app.get("/api/v1/nodes/{node_name}/sqlite-trends")
+def api_node_sqlite_trends(node_name: str, hours: int = Query(1, ge=1, le=24)):
+    """oc top 기반 SQLite 시계열 — Prometheus 미사용 환경 전용"""
+    data = _db.get_node_trend(node_name, hours)
+    return JSONResponse(_sanitize_json(data))
+
+# ── Node Conditions ───────────────────────────────────────────────
+@app.get("/api/v1/nodes/conditions")
+def api_node_conditions():
+    data = _collector.query_node_conditions()
+    return JSONResponse({"conditions": data})
+
+# ── VM Trends (on-demand) ─────────────────────────────────────────
+@app.get("/api/v1/vms/{namespace}/{vm_name}/trends")
+def api_vm_trends(namespace: str, vm_name: str, hours: int = Query(1, ge=1, le=24)):
+    data = _collector.query_vm_trends(vm_name, namespace, hours)
+    return JSONResponse(MetricsCollector._sanitize(data))
+
+# ── Alerts Detail ────────────────────────────────────────────────
+@app.get("/api/v1/alerts")
+def api_alerts():
+    alerts = _sanitize_json(getattr(_collector.metrics, "_alerts_detail", []))
+    trend  = _sanitize_json(_db.get_alert_history_trend(hours=1))
+    by_sev = {}
+    for a in alerts:
+        s = a.get("severity","none")
+        by_sev.setdefault(s, []).append(a)
+    return JSONResponse({
+        "alerts": alerts, "by_severity": by_sev,
+        "counts": {s: len(v) for s, v in by_sev.items()},
+        "trend": trend,
+    })
+
+# ── Route SLO ─────────────────────────────────────────────────────
+@app.get("/api/v1/routes")
+def api_routes(hours: int = Query(24, ge=1, le=168)):
+    probes = _sanitize_json(getattr(_collector.metrics, "_route_probes", []))
+    slo    = _sanitize_json(_db.get_route_slo(hours))
+    return JSONResponse({"current": probes, "slo": slo, "hours": hours})
+
+@app.get("/api/v1/routes/{route_name}/trend")
+def api_route_trend(route_name: str, hours: int = Query(1, ge=1, le=24)):
+    return JSONResponse(_sanitize_json(_db.get_route_trend(route_name, hours)))
+
+# ── User Workload Monitoring ──────────────────────────────────────
+@app.get("/api/v1/uwm")
+def api_uwm():
+    return JSONResponse(_sanitize_json(getattr(_collector.metrics, "_uwm_status", {})))
+
+# ── Incidents ─────────────────────────────────────────────────────
+@app.get("/api/v1/incidents")
+def api_incidents():
+    active   = [i for i in _db.get_incidents(50) if i["status"] == "active"]
+    resolved = [i for i in _db.get_incidents(50) if i["status"] == "resolved"]
+    return JSONResponse({"active": active, "resolved": resolved[:10]})
+
+# ── Alert Trend (SQLite) ──────────────────────────────────────────
+@app.get("/api/v1/alerts/trend")
+def api_alert_trend(hours: int = Query(1, ge=1, le=24)):
+    return JSONResponse(_sanitize_json(_db.get_alert_history_trend(hours)))
 
 # ── Legacy Report ─────────────────────────────────────────────────
 @app.get("/report.html")
@@ -1873,14 +2736,23 @@ SPA_HTML = r"""<!DOCTYPE html>
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
         Performance
       </div>
+      <div class="sb-item" data-page="alerts">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+        Alerts
+      </div>
+      <div class="sb-item" data-page="routes">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+        Route SLO
+      </div>
+      <div class="sb-item" data-page="incidents">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        Incidents
+      </div>
       <div class="sb-item" data-page="collector">
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
         Collector Health
       </div>
-      <div class="sb-item" data-page="legacy">
-        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-        Full Report
-      </div>
+
     </nav>
     <div class="sb-footer">
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -1919,40 +2791,127 @@ SPA_HTML = r"""<!DOCTYPE html>
     <div id="content">
       <!-- PAGE: OVERVIEW -->
       <div id="page-overview" class="page">
-        <div class="kpi-grid" id="kpi-row"></div>
+        <!-- KPI Row -->
+        <div class="kpi-grid" id="kpi-row" style="margin-bottom:14px;"></div>
+
+        <!-- Row 2: Health + Infra quick status -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
           <div class="card">
             <div class="sec-title">Cluster Health</div>
             <div id="health-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
           </div>
           <div class="card">
-            <div class="sec-title">VM Status Distribution</div>
-            <div id="vm-status-chart" style="height:140px;display:flex;align-items:center;justify-content:center;"></div>
+            <div class="sec-title">Infrastructure Services</div>
+            <div id="infra-quick" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
           </div>
         </div>
-        <div class="card">
-          <div class="sec-title" style="justify-content:space-between;">
-            CPU · Memory Trend (1h)
-            <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">SQLite 수집 이력</span>
+
+        <!-- Row 3: Top 5 Panels -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="card">
+            <div class="sec-title" style="color:var(--accent2);">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+              Top 5 · CPU
+            </div>
+            <div id="top5-cpu"></div>
           </div>
-          <div class="chart-wrap" style="height:160px;">
-            <canvas id="chart-cluster-trend"></canvas>
+          <div class="card">
+            <div class="sec-title" style="color:#a78bfa;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/></svg>
+              Top 5 · Memory
+            </div>
+            <div id="top5-mem"></div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="color:#34d399;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+              Top 5 · Disk Used
+            </div>
+            <div id="top5-disk"></div>
+          </div>
+        </div>
+
+        <!-- Row 4: Trend Charts -->
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;">
+          <div class="card">
+            <div class="sec-title" style="justify-content:space-between;">
+              CPU · Memory Trend (1h)
+              <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">30s SQLite 이력</span>
+            </div>
+            <div class="chart-wrap" style="height:150px;"><canvas id="chart-cluster-trend"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="sec-title">VM Status</div>
+            <div id="vm-status-chart" style="padding-top:4px;"></div>
           </div>
         </div>
       </div>
 
       <!-- PAGE: NODES -->
       <div id="page-nodes" class="page" style="display:none;">
+        <!-- 노드 개별 상태 카드 (kube_node_status_condition) -->
+        <div id="node-condition-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px;"></div>
+        <!-- 노드 테이블 -->
         <div class="card">
-          <div class="sec-title">Node Metrics</div>
+          <div class="sec-title" style="justify-content:space-between;">
+            Node Metrics
+            <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">행 클릭 → 시계열 차트</span>
+          </div>
           <div style="overflow-x:auto;">
             <table class="tbl" id="tbl-nodes">
               <thead><tr>
                 <th>Name</th><th>Roles</th><th>Status</th><th>Age</th>
                 <th>CPU (top)</th><th>CPU %</th><th>Memory (top)</th><th>Mem %</th>
+                <th>Net RX</th><th>Net TX</th>
               </tr></thead>
               <tbody id="tbody-nodes"></tbody>
             </table>
+          </div>
+        </div>
+        <!-- 노드 상세 차트 패널 (클릭 시 표시) -->
+        <div id="node-detail-panel" style="display:none;margin-top:14px;">
+          <div class="card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <div class="sec-title" style="margin-bottom:0;" id="node-detail-title">노드 상세</div>
+              <button onclick="document.getElementById('node-detail-panel').style.display='none'"
+                style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
+                       padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
+              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
+              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-net"></canvas></div></div>
+              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">디스크 I/O (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-disk"></canvas></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VM 상세 모달 -->
+      <div id="vm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto;padding:20px;">
+        <div style="max-width:960px;margin:0 auto;background:var(--bg-card);border:1px solid var(--bd-bright);border-radius:12px;padding:24px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+            <div>
+              <div id="vm-modal-title" style="font-size:16px;font-weight:700;color:var(--txt-primary);"></div>
+              <div id="vm-modal-sub" style="font-size:11px;color:var(--txt-muted);margin-top:2px;"></div>
+            </div>
+            <button onclick="document.getElementById('vm-modal').style.display='none'"
+              style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
+                     padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;">✕ 닫기</button>
+          </div>
+          <!-- VM 정보 카드 -->
+          <div id="vm-modal-info" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:16px;"></div>
+          <!-- 디스크 볼륨 정보 -->
+          <div id="vm-modal-volumes" style="margin-bottom:16px;"></div>
+          <!-- 시계열 차트 -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:130px;"><canvas id="vm-chart-cpu"></canvas></div></div>
+            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:130px;"><canvas id="vm-chart-mem"></canvas></div></div>
+            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 RX/TX (bytes/s)</div><div style="height:130px;"><canvas id="vm-chart-net"></canvas></div></div>
+            <div class="card-sm"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">디스크 Read/Write (bytes/s)</div><div style="height:130px;"><canvas id="vm-chart-disk"></canvas></div></div>
+          </div>
+          <div style="text-align:center;margin-top:10px;">
+            <div id="vm-modal-loading" style="color:var(--txt-muted);font-size:12px;">시계열 데이터 로딩 중...</div>
           </div>
         </div>
       </div>
@@ -1981,8 +2940,8 @@ SPA_HTML = r"""<!DOCTYPE html>
             <table class="tbl">
               <thead><tr>
                 <th>Name</th><th>Namespace</th><th>Status</th><th>Node</th>
-                <th>IP</th><th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
-                <th>Net RX</th><th>Net TX</th><th>Age</th>
+                <th>IP</th><th>CPU</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
+                <th>Disk Used</th><th>Net RX</th><th>Net TX</th><th>Age</th><th></th>
               </tr></thead>
               <tbody id="tbody-vms"></tbody>
             </table>
@@ -1992,6 +2951,23 @@ SPA_HTML = r"""<!DOCTYPE html>
 
       <!-- PAGE: STORAGE -->
       <div id="page-storage" class="page" style="display:none;">
+        <!-- Top 5 패널 -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="card">
+            <div class="sec-title" style="color:#f59e0b;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+              Top 5 · 최대 할당 PV
+            </div>
+            <div id="top5-pv"></div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="color:#34d399;">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/></svg>
+              Top 5 · 실제 사용량 PVC
+            </div>
+            <div id="top5-pvc-used"></div>
+          </div>
+        </div>
         <div class="card" style="margin-bottom:14px;">
           <div class="sec-title">Storage Pools</div>
           <div id="storage-pools" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;"></div>
@@ -2062,6 +3038,119 @@ SPA_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- PAGE: ALERTS -->
+      <div id="page-alerts" class="page" style="display:none;">
+        <!-- 인시던트 배너 -->
+        <div id="incident-banner" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);
+          border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+          <div style="font-size:12px;font-weight:700;color:#ef4444;margin-bottom:6px;">🚨 활성 인시던트</div>
+          <div id="incident-banner-list"></div>
+        </div>
+        <!-- 심각도별 KPI -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;" id="alert-kpi-row"></div>
+        <!-- 알럿 트렌드 차트 -->
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="card">
+            <div class="sec-title" style="justify-content:space-between;">
+              알럿 추이 (1h)
+              <span style="font-size:10px;color:var(--txt-muted);font-weight:400;">SQLite 수집 이력</span>
+            </div>
+            <div class="chart-wrap" style="height:120px;"><canvas id="chart-alert-trend"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="sec-title">심각도 분포</div>
+            <div id="alert-sev-dist"></div>
+          </div>
+        </div>
+        <!-- 알럿 목록 -->
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+            <div class="sec-title" style="margin:0;">Firing Alerts</div>
+            <select id="alert-sev-filter" style="background:var(--bg-card2);border:1px solid var(--bd-bright);
+              border-radius:5px;padding:4px 8px;font-size:11px;color:var(--txt-primary);outline:none;margin-left:auto;">
+              <option value="">All Severity</option>
+              <option value="critical">Critical</option>
+              <option value="warning">Warning</option>
+              <option value="info">Info</option>
+            </select>
+            <input id="alert-search" placeholder="이름/네임스페이스 검색..."
+              style="background:var(--bg-card2);border:1px solid var(--bd-bright);border-radius:5px;
+                     padding:4px 10px;font-size:11px;color:var(--txt-primary);outline:none;width:200px;">
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="tbl">
+              <thead><tr>
+                <th>Severity</th><th>Alert Name</th><th>Namespace</th>
+                <th>Service/Pod</th><th>Node</th><th>Summary</th>
+              </tr></thead>
+              <tbody id="tbody-alerts"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: ROUTE SLO -->
+      <div id="page-routes" class="page" style="display:none;">
+        <!-- SLO 요약 -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;"
+             id="route-kpi-row"></div>
+        <!-- Route 목록 + SLO -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="card">
+            <div class="sec-title" style="justify-content:space-between;">
+              Route 목록 (현재 상태)
+              <span id="route-probe-time" style="font-size:10px;color:var(--txt-muted);font-weight:400;"></span>
+            </div>
+            <div style="overflow-x:auto;max-height:400px;overflow-y:auto;">
+              <table class="tbl">
+                <thead><tr>
+                  <th>Name</th><th>Namespace</th><th>Host</th>
+                  <th>Status</th><th>Latency</th>
+                </tr></thead>
+                <tbody id="tbody-routes-current"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="justify-content:space-between;">
+              SLO (24h 가용성)
+              <select id="slo-hours" style="background:var(--bg-card2);border:1px solid var(--bd-bright);
+                border-radius:5px;padding:3px 6px;font-size:10px;color:var(--txt-primary);outline:none;">
+                <option value="1">1h</option>
+                <option value="6">6h</option>
+                <option value="24" selected>24h</option>
+                <option value="168">7d</option>
+              </select>
+            </div>
+            <div style="overflow-x:auto;max-height:400px;overflow-y:auto;">
+              <table class="tbl">
+                <thead><tr><th>Route</th><th>Namespace</th><th>SLO %</th><th>Avg ms</th><th>Probes</th></tr></thead>
+                <tbody id="tbody-routes-slo"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <!-- UWM 상태 -->
+        <div class="card" id="uwm-panel">
+          <div class="sec-title">User Workload Monitoring</div>
+          <div id="uwm-content"></div>
+        </div>
+      </div>
+
+      <!-- PAGE: INCIDENTS -->
+      <div id="page-incidents" class="page" style="display:none;">
+        <!-- 활성 인시던트 -->
+        <div class="card" style="margin-bottom:14px;">
+          <div class="sec-title" style="color:var(--danger);">🚨 활성 인시던트</div>
+          <div id="incidents-active"></div>
+        </div>
+        <!-- 해소된 인시던트 -->
+        <div class="card">
+          <div class="sec-title">✅ 최근 해소된 인시던트</div>
+          <div id="incidents-resolved"></div>
+        </div>
+      </div>
+
       <!-- PAGE: COLLECTOR HEALTH -->
       <div id="page-collector" class="page" style="display:none;">
         <!-- Prometheus Status -->
@@ -2106,12 +3195,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-
-      <!-- PAGE: LEGACY REPORT -->
-      <div id="page-legacy" class="page" style="display:none;height:calc(100vh - 100px);">
-        <iframe src="/report.html" style="width:100%;height:100%;border:none;border-radius:8px;background:#fff;"></iframe>
-      </div>
-    </div>
+</div>
   </div>
 </div>
 
@@ -2143,6 +3227,7 @@ document.getElementById('nav').addEventListener('click', e => {
   state.currentPage = page;
   if (page === 'collector') fetchCollector();
   if (page === 'performance') renderPerformance(state.overview);
+  if (page === 'nodes') loadNodeConditions();
 });
 
 // ═══════════════════════════════════════════════
@@ -2246,46 +3331,74 @@ function sparkDataset(label, data, color) {
 // ═══════════════════════════════════════════════
 // RENDER: OVERVIEW
 // ═══════════════════════════════════════════════
+function renderTop5(elId, items, valFn, color) {
+  if (!items || !items.length) {
+    document.getElementById(elId).innerHTML =
+      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">데이터 수집 중...</div>';
+    return;
+  }
+  document.getElementById(elId).innerHTML = items.map((vm, i) => {
+    const val = valFn(vm);
+    const pct = typeof val === 'number' ? Math.min(val, 100) : 0;
+    const label = typeof val === 'number' ? (elId.includes('disk') ? fmtBytes(vm.disk_used_bytes||0) : fmtPct(val)) : '—';
+    return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+          <div style="min-width:0;">
+            <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
+            <div style="font-size:10px;color:var(--txt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.namespace}</div>
+          </div>
+        </div>
+        <span style="font-size:12px;font-weight:700;color:${color};flex-shrink:0;margin-left:6px;">${label}</span>
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${pct}%;"></div></div>
+    </div>`;
+  }).join('');
+}
+
 function renderOverview(d) {
   const c = d.cluster, ct = d.counts;
-  // KPI
-  document.getElementById('kpi-row').innerHTML = [
-    { label:'OCP Version', value: d.ocp_version, sub:'', color:'var(--accent)' },
-    { label:'Total Nodes', value: ct.nodes, sub:'', color:'var(--txt-primary)' },
-    { label:'VMs Running', value: ct.vms_running, sub:`/ ${ct.vms_total} total`, color:'var(--success)' },
-    { label:'VMs Stopped', value: ct.vms_stopped, sub:'', color:'var(--txt-muted)' },
-    { label:'VMs Failed', value: ct.vms_failed, sub:'', color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)' },
-    { label:'Firing Alerts', value: c.firing_alerts, sub:'', color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)' },
-    { label:'Cluster CPU', value: fmtPct(c.cpu_pct), sub:'', color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)' },
-    { label:'Cluster Mem', value: fmtPct(c.mem_pct), sub:'', color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)' },
-  ].map(k => `
+
+  // ── KPI 카드 ──
+  const kpis = [
+    { label:'OCP Version',    value: d.ocp_version,     color:'var(--accent)',   sub:'' },
+    { label:'Nodes',          value: ct.nodes,           color:'var(--txt-primary)', sub:'' },
+    { label:'Running VMs',    value: ct.vms_running,     color:'var(--success)', sub:`/ ${ct.vms_total}` },
+    { label:'Stopped VMs',    value: ct.vms_stopped,     color:'var(--txt-muted)', sub:'' },
+    { label:'Provisioning',   value: ct.vms_provisioning,color:'var(--warn)',    sub:'' },
+    { label:'Failed VMs',     value: ct.vms_failed,      color: ct.vms_failed > 0 ? 'var(--danger)' : 'var(--txt-muted)', sub:'' },
+    { label:'Cluster CPU',    value: fmtPct(c.cpu_pct),  color: c.cpu_pct > 90 ? 'var(--danger)' : c.cpu_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
+    { label:'Cluster Mem',    value: fmtPct(c.mem_pct),  color: c.mem_pct > 90 ? 'var(--danger)' : c.mem_pct > 70 ? 'var(--warn)' : 'var(--success)', sub:'' },
+    { label:'Firing Alerts',  value: c.firing_alerts,    color: c.firing_alerts > 0 ? 'var(--danger)' : 'var(--success)', sub:'' },
+    { label:'Operators OK',   value: `${(d.infra?.cluster_operators||[]).filter(o=>o.available&&!o.degraded).length} / ${ct.cluster_operators}`, color:'var(--success)', sub:'' },
+    { label:'PV / PVC',       value: `${ct.pv} / ${ct.pvc}`, color:'var(--accent2)', sub:'' },
+    { label:'Storage Pools',  value: ct.storage_pools,   color:'var(--txt-secondary)', sub:'' },
+  ];
+  document.getElementById('kpi-row').innerHTML = kpis.map(k => `
     <div class="kpi">
       <div class="label">${k.label}</div>
-      <div class="value" style="color:${k.color}">${k.value}</div>
+      <div class="value" style="color:${k.color};font-size:${String(k.value).length > 6 ? '16px' : '22px'}">${k.value}</div>
       ${k.sub ? `<div class="sub">${k.sub}</div>` : ''}
-    </div>
-  `).join('');
+    </div>`).join('');
 
   // Alert badge
   const ab = document.getElementById('alert-badge');
-  if (c.firing_alerts > 0) {
-    ab.style.display = '';
-    ab.textContent = `${c.firing_alerts} Firing Alerts`;
-  } else { ab.style.display = 'none'; }
+  if (c.firing_alerts > 0) { ab.style.display = ''; ab.textContent = `${c.firing_alerts} Firing Alerts`; }
+  else { ab.style.display = 'none'; }
 
-  // Health cards
+  // ── Cluster Health 카드 ──
   document.getElementById('health-cards').innerHTML = [
     { label:'API Server', v: c.api_server },
-    { label:'ETCD', v: c.etcd },
-    { label:'CoreDNS', v: c.coredns },
-    { label:'ETCD Leader', v: c.etcd_leader },
+    { label:'ETCD',       v: c.etcd },
+    { label:'CoreDNS',    v: c.coredns },
+    { label:'ETCD Leader',v: c.etcd_leader },
   ].map(h => {
-    const ok = h.v != null && h.v >= 1;
-    const unk = h.v == null;
+    const ok = h.v != null && h.v >= 1, unk = h.v == null;
     const cls = unk ? 'badge-off' : ok ? 'badge-ok' : 'badge-err';
     const txt = unk ? 'N/A' : ok ? 'Healthy' : 'Unhealthy';
     return `<div class="card-sm" style="display:flex;align-items:center;gap:8px;">
-      <span class="dot ${unk ? 'dot-off' : ok ? 'dot-ok' : 'dot-err'}"></span>
+      <span class="dot ${unk?'dot-off':ok?'dot-ok':'dot-err'}"></span>
       <div>
         <div style="font-size:11px;color:var(--txt-muted);">${h.label}</div>
         <div class="badge ${cls}" style="margin-top:3px;">${txt}</div>
@@ -2293,25 +3406,83 @@ function renderOverview(d) {
     </div>`;
   }).join('');
 
-  // VM Status donut (simple bars)
-  const total = ct.vms_total || 1;
-  document.getElementById('vm-status-chart').innerHTML = `
-    <div style="width:100%;">
-      ${[['Running', ct.vms_running, 'var(--success)'],
-         ['Stopped', ct.vms_stopped, 'var(--txt-muted)'],
-         ['Provisioning', ct.vms_provisioning, 'var(--warn)'],
-         ['Failed', ct.vms_failed, 'var(--danger)'],
-        ].map(([lbl, cnt, color]) => `
-        <div style="margin-bottom:8px;">
-          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
-            <span style="color:var(--txt-secondary);">${lbl}</span>
-            <span style="color:${color};font-weight:600;">${cnt}</span>
-          </div>
-          <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%"></div></div>
-        </div>`).join('')}
-    </div>`;
+  // ── Infra Quick Status ──
+  const im = d.infra || {};
+  const r = im.router || {};
+  document.getElementById('infra-quick').innerHTML = [
+    { label:'Router Req/s',    v: r.req_rate != null ? r.req_rate.toFixed(1)+'/s' : '—',   ok: r.req_rate != null },
+    { label:'Router 5xx/s',   v: r['5xx_rate'] != null ? r['5xx_rate'].toFixed(2)+'/s':'—', ok: r['5xx_rate'] != null && r['5xx_rate'] < 1 },
+    { label:'Pending Pods',   v: im.scheduler?.pending != null ? Math.round(im.scheduler.pending) : '—', ok: (im.scheduler?.pending||0) < 5 },
+    { label:'OVN Ports',      v: im.ovn?.ports != null ? Math.round(im.ovn.ports) : '—',   ok: im.ovn?.ports != null },
+    { label:'Registry Req/s', v: im.registry?.req_rate != null ? im.registry.req_rate.toFixed(2)+'/s':'—', ok: im.registry?.req_rate != null },
+    { label:'Operators Deg.', v: (im.cluster_operators||[]).filter(o=>o.degraded).length,   ok: (im.cluster_operators||[]).filter(o=>o.degraded).length === 0 },
+  ].map(({label,v,ok}) => `
+    <div class="card-sm" style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span class="dot ${ok?'dot-ok':'dot-warn'}"></span>
+        <span style="font-size:11px;color:var(--txt-secondary);">${label}</span>
+      </div>
+      <span style="font-size:12px;font-weight:700;color:var(--txt-primary);">${v}</span>
+    </div>`).join('');
 
-  // Fetch trend and chart it
+  // ── Top 5 VMs ──
+  const vms = d.vms || [];
+  const running = vms.filter(v => v.status_group === 'running');
+
+  // CPU Top 5
+  const top5cpu = [...running].filter(v => v.cpu_pct != null)
+    .sort((a,b) => (b.cpu_pct||0) - (a.cpu_pct||0)).slice(0,5);
+  renderTop5('top5-cpu', top5cpu, v => v.cpu_pct, '#3b82f6');
+
+  // Memory Top 5
+  const top5mem = [...running].filter(v => v.mem_pct != null)
+    .sort((a,b) => (b.mem_pct||0) - (a.mem_pct||0)).slice(0,5);
+  renderTop5('top5-mem', top5mem, v => v.mem_pct, '#a78bfa');
+
+  // Disk Top 5 (disk_used_bytes 기준, running 아닌 것도 포함)
+  const top5disk = [...vms].filter(v => (v.disk_used_bytes||0) > 0)
+    .sort((a,b) => (b.disk_used_bytes||0) - (a.disk_used_bytes||0)).slice(0,5);
+  // disk는 절대값 비교 — 최대값 대비 %로 bar 표시
+  const maxDisk = top5disk[0]?.disk_used_bytes || 1;
+  if (top5disk.length) {
+    document.getElementById('top5-disk').innerHTML = top5disk.map((vm,i) => {
+      const pct = Math.round((vm.disk_used_bytes||0) / maxDisk * 100);
+      return `<div style="padding:7px 0;border-bottom:1px solid var(--bd);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+            <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+            <div style="min-width:0;">
+              <div style="font-size:12px;font-weight:600;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${vm.name}</div>
+              <div style="font-size:10px;color:var(--txt-muted);">${vm.namespace}</div>
+            </div>
+          </div>
+          <span style="font-size:12px;font-weight:700;color:#34d399;flex-shrink:0;margin-left:6px;">${fmtBytes(vm.disk_used_bytes||0)}</span>
+        </div>
+        <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%;"></div></div>
+      </div>`;
+    }).join('');
+  } else {
+    document.getElementById('top5-disk').innerHTML =
+      '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">수집 중 (30s 후 표시)</div>';
+  }
+
+  // ── VM Status 바 ──
+  const total = ct.vms_total || 1;
+  document.getElementById('vm-status-chart').innerHTML = [
+    ['Running',     ct.vms_running,     'var(--success)'],
+    ['Stopped',     ct.vms_stopped,     'var(--txt-muted)'],
+    ['Provisioning',ct.vms_provisioning,'var(--warn)'],
+    ['Failed',      ct.vms_failed,      'var(--danger)'],
+  ].map(([lbl,cnt,color]) => `
+    <div style="margin-bottom:9px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+        <span style="color:var(--txt-secondary);">${lbl}</span>
+        <span style="color:${color};font-weight:700;">${cnt} <span style="color:var(--txt-muted);font-weight:400;">(${Math.round(cnt/total*100)}%)</span></span>
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(cnt/total*100)}%;"></div></div>
+    </div>`).join('');
+
+  // ── Trend Chart ──
   fetch('/api/v1/trends/cluster?hours=1').then(r => r.json()).then(t => {
     mkChart('chart-cluster-trend', t.labels,
       [sparkDataset('CPU %', t.cpu, '#3b82f6'),
@@ -2323,10 +3494,218 @@ function renderOverview(d) {
 // ═══════════════════════════════════════════════
 // RENDER: NODES
 // ═══════════════════════════════════════════════
+let _nodeConditions = {};
+
+// 노드 데이터 소스 전역 변수
+let _nodeDataSource = 'cli';     // 'prometheus' | 'cli'
+let _nodeNetAvailable = false;
+const NODE_CLI_TOOLTIP = "현재 환경에서 node-exporter가 Thanos에 노출되지 않아\nCPU/MEM은 oc adm top nodes CLI로 수집됩니다.\n네트워크 RX/TX는 수집 불가합니다.";
+const NODE_PROM_TOOLTIP = "Prometheus(Thanos)에서 실시간 수집 중입니다.";
+
+async function loadNodeConditions() {
+  try {
+    const d = await fetch('/api/v1/nodes/conditions').then(r => r.json());
+    _nodeConditions = {};
+    (d.conditions || []).forEach(c => { _nodeConditions[c.node] = c; });
+    renderNodeCards();
+  } catch(e) {}
+}
+
+function renderNodeCards() {
+  const nodes = state.overview?.nodes || [];
+  const el = document.getElementById('node-condition-cards');
+  if (!el) return;
+  el.innerHTML = nodes.map(n => {
+    const c = _nodeConditions[n.name] || {};
+    const ready = c.ready !== undefined ? c.ready : (n.status === 'Ready' ? 1 : 0);
+    const mem_p = c.memory_pressure || 0;
+    const disk_p = c.disk_pressure || 0;
+    const pid_p  = c.pid_pressure || 0;
+    const net_u  = c.network_unavailable || 0;
+
+    const ok = ready && !mem_p && !disk_p && !pid_p && !net_u;
+    const warn = ready && (mem_p || disk_p || pid_p);
+    const bc = ok ? 'var(--success)' : warn ? 'var(--warn)' : 'var(--danger)';
+    const st = ok ? 'Ready' : warn ? 'Pressure' : 'NotReady';
+
+    const pressures = [
+      mem_p  ? '<span style="font-size:9px;background:rgba(245,158,11,.2);color:#fbbf24;padding:1px 4px;border-radius:3px;">Mem</span>' : '',
+      disk_p ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">Disk</span>' : '',
+      pid_p  ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">PID</span>' : '',
+      net_u  ? '<span style="font-size:9px;background:rgba(239,68,68,.2);color:#f87171;padding:1px 4px;border-radius:3px;">Net</span>' : '',
+    ].filter(Boolean).join(' ');
+
+    const isWorker = n.roles.includes('worker');
+    const roleColor = isWorker ? 'var(--accent)' : 'var(--accent2)';
+    const roleLabel = isWorker ? 'Worker' : 'Master';
+
+    return `<div onclick="openNodeDetail('${n.name}')"
+      style="background:var(--bg-card);border:1px solid ${bc}33;border-radius:10px;padding:12px;cursor:pointer;
+             transition:border-color .15s;hover:border-color:${bc};">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:${bc};flex-shrink:0;
+                    box-shadow:0 0 6px ${bc};"></div>
+        <span style="font-size:11px;font-weight:700;color:var(--txt-primary);white-space:nowrap;
+                     overflow:hidden;text-overflow:ellipsis;flex:1;">${n.name.split('.')[0]}</span>
+        <span style="font-size:9px;font-weight:700;color:${roleColor};flex-shrink:0;">${roleLabel}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;margin-bottom:6px;">
+        <div style="font-size:10px;color:${bc};font-weight:700;">${st} ${pressures}</div>
+        <span title="${_nodeDataSource==='cli'?NODE_CLI_TOOLTIP:NODE_PROM_TOOLTIP}"
+          style="font-size:8px;padding:1px 4px;border-radius:3px;cursor:help;
+                 background:${_nodeDataSource==='cli'?'rgba(251,191,36,.2)':'rgba(16,185,129,.2)'};
+                 color:${_nodeDataSource==='cli'?'#fbbf24':'#10b981'};font-weight:700;">
+          ${_nodeDataSource==='cli'?'CLI':'PROM'}
+        </span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+        <div>
+          <div style="font-size:9px;color:var(--txt-muted);margin-bottom:2px;">CPU</div>
+          <div class="pbar"><div class="pbar-fill ${pbarColor(n.cpu_pct)}" style="width:${n.cpu_pct||0}%"></div></div>
+          <div style="font-size:9px;color:var(--txt-secondary);margin-top:1px;">${fmtPct(n.cpu_pct)}</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--txt-muted);margin-bottom:2px;">Mem</div>
+          <div class="pbar"><div class="pbar-fill ${pbarColor(n.mem_pct)}" style="width:${n.mem_pct||0}%"></div></div>
+          <div style="font-size:9px;color:var(--txt-secondary);margin-top:1px;">${fmtPct(n.mem_pct)}</div>
+        </div>
+      </div>
+      ${(n.net_rx_bps || n.net_tx_bps) ? `<div style="display:flex;justify-content:space-between;margin-top:6px;font-size:9px;color:var(--txt-muted);">
+        <span>↓${fmtBps(n.net_rx_bps)}</span><span>↑${fmtBps(n.net_tx_bps)}</span>
+      </div>` : ''}
+      <div style="font-size:9px;color:var(--txt-muted);margin-top:3px;text-align:center;">클릭 → 시계열</div>
+    </div>`;
+  }).join('');
+}
+
+async function openNodeDetail(nodeName) {
+  const panel = document.getElementById('node-detail-panel');
+  panel.style.display = '';
+  panel.scrollIntoView({behavior:'smooth'});
+
+  const node = (state.overview?.nodes || []).find(n => n.name === nodeName) || {};
+  const isCLI = _nodeDataSource !== 'prometheus';
+
+  if (isCLI) {
+    document.getElementById('node-detail-title').textContent =
+      nodeName + ' — CPU / MEM 추이 (oc top · SQLite)';
+
+    const chartArea = panel.querySelector('.card > div:last-child');
+    if (chartArea) {
+      chartArea.innerHTML = `
+        <!-- 데이터 소스 안내 배너 -->
+        <div style="background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);
+                    border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px;color:#fbbf24;
+                    display:flex;align-items:flex-start;gap:8px;">
+          <span style="flex-shrink:0;font-size:14px;">⚠</span>
+          <div>
+            <strong>CLI 수집 모드</strong> — node-exporter가 Thanos에 노출되지 않아
+            CPU/MEM은 <code style="background:rgba(0,0,0,.3);padding:1px 4px;border-radius:3px;">oc adm top nodes</code>
+            로 30초마다 수집 후 SQLite에 저장됩니다. 네트워크/디스크 I/O는 수집 불가합니다.
+          </div>
+        </div>
+        <!-- Current Usage -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:14px;">
+          ${[
+            ['CPU 현재', fmtPct(node.cpu_pct), node.cpu_pct, '#3b82f6'],
+            ['CPU (cores)', node.cpu_usage||'—', null, 'var(--txt-secondary)'],
+            ['MEM 현재', fmtPct(node.mem_pct), node.mem_pct, '#a78bfa'],
+            ['MEM (bytes)', node.mem_usage||'—', null, 'var(--txt-secondary)'],
+            ['Network', 'N/A', null, 'var(--txt-muted)'],
+            ['Disk I/O', 'N/A', null, 'var(--txt-muted)'],
+          ].map(([lbl,val,pct,color]) => `
+            <div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:10px;text-align:center;">
+              <div style="font-size:9px;color:var(--txt-muted);text-transform:uppercase;margin-bottom:5px;">${lbl}</div>
+              <div style="font-size:16px;font-weight:700;color:${color};">${val}</div>
+              ${pct!=null?`<div class="pbar" style="margin-top:5px;"><div class="pbar-fill ${pbarColor(pct)}" style="width:${pct||0}%"></div></div>`:''}
+            </div>`).join('')}
+        </div>
+        <!-- SQLite 기반 시계열 차트 -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div>
+            <div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
+              CPU 사용률 (1h)
+              <span style="font-size:9px;background:rgba(251,191,36,.2);color:#fbbf24;padding:1px 5px;border-radius:3px;">SQLite</span>
+            </div>
+            <div style="height:120px;"><canvas id="nd-sqlite-cpu"></canvas></div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
+              Memory 사용률 (1h)
+              <span style="font-size:9px;background:rgba(251,191,36,.2);color:#fbbf24;padding:1px 5px;border-radius:3px;">SQLite</span>
+            </div>
+            <div style="height:120px;"><canvas id="nd-sqlite-mem"></canvas></div>
+          </div>
+        </div>
+        <div id="nd-sqlite-loading" style="text-align:center;font-size:11px;color:var(--txt-muted);margin-top:8px;">
+          SQLite 이력 로딩 중...
+        </div>`;
+    }
+
+    // SQLite 시계열 로드
+    try {
+      const d = await fetch(
+        `/api/v1/nodes/${encodeURIComponent(nodeName)}/sqlite-trends?hours=1`
+      ).then(r => r.json());
+
+      const lbl = d.labels || [];
+      const loadingEl = document.getElementById('nd-sqlite-loading');
+
+      if (lbl.length >= 2) {
+        ['nd-sqlite-cpu','nd-sqlite-mem'].forEach(id => {
+          if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
+        });
+        mkChart('nd-sqlite-cpu', lbl,
+          [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0, yMax:100});
+        mkChart('nd-sqlite-mem', lbl,
+          [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
+        if (loadingEl) loadingEl.textContent =
+          `${d.point_count}개 데이터 포인트 (30s 간격, SQLite)`;
+      } else {
+        if (loadingEl) loadingEl.textContent =
+          `데이터 부족 (${lbl.length}개) — 최소 2개 폴링 사이클 후 표시됩니다.`;
+      }
+    } catch(e) {
+      const el = document.getElementById('nd-sqlite-loading');
+      if (el) el.textContent = 'SQLite 이력 로드 실패: ' + e.message;
+    }
+    return;
+  }
+
+  // Prometheus 모드: 시계열 차트 로드
+  document.getElementById('node-detail-title').textContent = nodeName + ' — 시계열 (1h)';
+  ['nd-chart-cpu','nd-chart-mem','nd-chart-net','nd-chart-disk'].forEach(id => {
+    if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
+    const c = document.getElementById(id);
+    if (c) c.insertAdjacentHTML('afterend', '<div style="font-size:11px;color:var(--txt-muted);padding:8px;">로딩 중...</div>');
+  });
+  try {
+    const d = await fetch(`/api/v1/nodes/${encodeURIComponent(nodeName)}/trends?hours=1`).then(r => r.json());
+    const lbl = d.labels || [];
+    [['nd-chart-cpu','CPU %',d.cpu,'#3b82f6',0,100],
+     ['nd-chart-mem','Mem %',d.mem,'#a78bfa',0,100],
+    ].forEach(([id,lbl2,vals,color,mn,mx]) => {
+      document.getElementById(id)?.nextSibling?.remove?.();
+      mkChart(id, lbl, [sparkDataset(lbl2, vals||[], color)], {yMin:mn,yMax:mx});
+    });
+    mkChart('nd-chart-net', lbl, [
+      sparkDataset('RX', d.net_rx||[], '#06b6d4'),
+      sparkDataset('TX', d.net_tx||[], '#34d399'),
+    ], {legend:true});
+    mkChart('nd-chart-disk', lbl, [
+      sparkDataset('Read', d.disk_r||[], '#f59e0b'),
+      sparkDataset('Write', d.disk_w||[], '#f87171'),
+    ], {legend:true});
+    document.querySelectorAll('[id^="nd-chart-"]').forEach(c => c.nextSibling?.remove?.());
+  } catch(e) {
+    document.getElementById('node-detail-title').textContent += ' (데이터 없음)';
+  }
+}
+
 function renderNodes(nodes) {
   document.getElementById('tbody-nodes').innerHTML = nodes.map(n => {
     const cpc = pbarColor(n.cpu_pct), mpc = pbarColor(n.mem_pct);
-    return `<tr>
+    return `<tr style="cursor:pointer;" onclick="openNodeDetail('${n.name}')">
       <td class="mono" style="color:var(--accent2)">${n.name}</td>
       <td><span class="badge badge-off">${n.roles}</span></td>
       <td><span class="dot ${n.status==='Ready'?'dot-ok':'dot-err'}"></span> ${n.status}</td>
@@ -2335,9 +3714,111 @@ function renderNodes(nodes) {
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${cpc}" style="width:${n.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.cpu_pct)}</span></div></td>
       <td class="mono">${n.mem_usage}</td>
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${mpc}" style="width:${n.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.mem_pct)}</span></div></td>
+      <td class="mono" style="font-size:10px;color:var(--txt-secondary);"
+          title="${n.net_rx_bps==null?(_nodeNetAvailable?'수집 중':'환경 제약: node-exporter 미노출'):''}"
+          >${n.net_rx_bps!=null?fmtBps(n.net_rx_bps):(_nodeNetAvailable?'...':'N/A')}${n.net_rx_bps==null&&!_nodeNetAvailable?'⚠':''}</td>
+      <td class="mono" style="font-size:10px;color:var(--txt-secondary);"
+          title="${n.net_tx_bps==null?(_nodeNetAvailable?'수집 중':'환경 제약: node-exporter 미노출'):''}"
+          >${n.net_tx_bps!=null?fmtBps(n.net_tx_bps):(_nodeNetAvailable?'...':'N/A')}${n.net_tx_bps==null&&!_nodeNetAvailable?'⚠':''}</td>
     </tr>`;
   }).join('');
 }
+
+// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// VM DETAIL MODAL
+// ═══════════════════════════════════════════════
+async function openVMDetail(vmName, ns) {
+  const vm = _allVMs.find(v => v.name === vmName && v.namespace === ns);
+  if (!vm) return;
+
+  // 모달 열기
+  const modal = document.getElementById('vm-modal');
+  modal.style.display = '';
+  document.getElementById('vm-modal-title').textContent = vmName;
+  document.getElementById('vm-modal-sub').textContent = ns + '  ·  ' + vm.node + '  ·  ' + (vm.os || '—');
+  document.getElementById('vm-modal-loading').textContent = '시계열 로딩 중...';
+
+  // 정보 카드
+  document.getElementById('vm-modal-info').innerHTML = [
+    ['상태',        statusBadge(vm.status_group)],
+    ['IP',          `<span class="mono" style="font-size:11px">${vm.ip}</span>`],
+    ['CPU Cores',   vm.cpu_cores],
+    ['Memory',      vm.memory_total],
+    ['CPU 사용률',  fmtPct(vm.cpu_pct)],
+    ['Mem 사용률',  fmtPct(vm.mem_pct)],
+    ['Net RX',      fmtBps(vm.net_rx_bps)],
+    ['Net TX',      fmtBps(vm.net_tx_bps)],
+    ['Disk Used',   vm.disk_used_bytes ? fmtBytes(vm.disk_used_bytes) : '—'],
+    ['Age',         vm.age],
+  ].map(([l,v]) => `<div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:8px 10px;">
+    <div style="font-size:9px;color:var(--txt-muted);margin-bottom:3px;text-transform:uppercase;">${l}</div>
+    <div style="font-size:12px;font-weight:600;">${v}</div>
+  </div>`).join('');
+
+  // 볼륨 정보 (root/data 구분)
+  const vols = vm.volumes || [];
+  if (vols.length) {
+    document.getElementById('vm-modal-volumes').innerHTML =
+      '<div style="font-size:11px;font-weight:700;color:var(--txt-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em;">Volumes</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:6px;">' +
+      vols.map(vl => {
+        const isRoot = (vl.name||'').endsWith('-rootdisk') || (vl.pvc||'').endsWith('-rootdisk');
+        const used = vl.used_bytes || 0;
+        const cap  = vl.capacity_bytes || 0;
+        const pct  = cap ? Math.round(used/cap*100) : 0;
+        const dtype = isRoot ? 'Root' : 'Data';
+        const dc = isRoot ? 'var(--accent2)' : 'var(--accent)';
+        return `<div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:8px 12px;min-width:160px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span style="font-size:10px;font-weight:700;color:${dc};">${dtype}</span>
+            <span style="font-size:10px;color:var(--txt-muted);">${vl.name||vl.pvc||'—'}</span>
+          </div>
+          ${cap ? `<div style="font-size:11px;color:var(--txt-secondary);">${fmtBytes(used)} / ${fmtBytes(cap)}</div>
+          <div class="pbar" style="margin-top:4px;"><div class="pbar-fill" style="background:${dc};width:${pct}%"></div></div>` : '<div style="font-size:11px;color:var(--txt-muted);">용량 정보 없음</div>'}
+        </div>`;
+      }).join('') + '</div>';
+  } else {
+    document.getElementById('vm-modal-volumes').innerHTML = '';
+  }
+
+  // 차트 초기화
+  ['vm-chart-cpu','vm-chart-mem','vm-chart-net','vm-chart-disk'].forEach(id => {
+    if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
+  });
+
+  // 시계열 데이터 로드
+  try {
+    const d = await fetch(`/api/v1/vms/${encodeURIComponent(ns)}/${encodeURIComponent(vmName)}/trends?hours=1`).then(r => r.json());
+    const lbl = d.labels || [];
+    const hasData = lbl.length > 0;
+
+    if (hasData) {
+      mkChart('vm-chart-cpu', lbl, [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0,yMax:100});
+      mkChart('vm-chart-mem', lbl, [sparkDataset('Mem %', d.mem_pct||[], '#a78bfa')], {yMin:0,yMax:100});
+      mkChart('vm-chart-net', lbl, [
+        sparkDataset('RX', d.net_rx||[], '#06b6d4'),
+        sparkDataset('TX', d.net_tx||[], '#34d399'),
+      ], {legend:true});
+      mkChart('vm-chart-disk', lbl, [
+        sparkDataset('Read', d.disk_r||[], '#f59e0b'),
+        sparkDataset('Write', d.disk_w||[], '#f87171'),
+      ], {legend:true});
+      document.getElementById('vm-modal-loading').textContent = '';
+    } else {
+      document.getElementById('vm-modal-loading').textContent = vm.status_group !== 'running'
+        ? 'VM이 실행 중이 아니어서 시계열 데이터가 없습니다.'
+        : 'Prometheus 데이터가 아직 없습니다. (최소 2분 필요)';
+    }
+  } catch(e) {
+    document.getElementById('vm-modal-loading').textContent = '시계열 로드 실패: ' + e.message;
+  }
+}
+
+// 모달 외부 클릭 시 닫기
+document.getElementById('vm-modal').addEventListener('click', function(e) {
+  if (e.target === this) this.style.display = 'none';
+});
 
 // ═══════════════════════════════════════════════
 // RENDER: VMs
@@ -2361,20 +3842,31 @@ function filterVMs() {
     (!ns || v.namespace === ns) &&
     (!st || v.status_group === st)
   );
-  document.getElementById('tbody-vms').innerHTML = filtered.map(v => `<tr>
-    <td class="mono" style="color:var(--accent2)">${v.name}</td>
-    <td><span class="badge badge-off">${v.namespace}</span></td>
-    <td>${statusBadge(v.status_group)}</td>
-    <td style="color:var(--txt-secondary);font-size:11px;">${v.node}</td>
-    <td class="mono" style="font-size:11px;">${v.ip}</td>
-    <td style="text-align:center;">${v.cpu_cores}</td>
-    <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.cpu_pct)}" style="width:${v.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.cpu_pct)}</span></div></td>
-    <td style="font-size:11px;">${v.memory_total}</td>
-    <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.mem_pct)}" style="width:${v.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.mem_pct)}</span></div></td>
-    <td class="mono" style="font-size:10px;">${fmtBps(v.net_rx_bps)}</td>
-    <td class="mono" style="font-size:10px;">${fmtBps(v.net_tx_bps)}</td>
-    <td style="font-size:11px;">${v.age}</td>
-  </tr>`).join('') || '<tr><td colspan="12" style="text-align:center;color:var(--txt-muted);padding:24px;">VM 없음</td></tr>';
+  document.getElementById('tbody-vms').innerHTML = filtered.map(v => {
+    // root/data 디스크 구분
+    const vols = v.volumes || [];
+    const rootVol = vols.find(vl => (vl.name||'').endsWith('-rootdisk') || (vl.pvc||'').endsWith('-rootdisk'));
+    const dataVols = vols.filter(vl => vl !== rootVol);
+    const rootUsed = rootVol?.used_bytes || 0;
+    const dataUsed = dataVols.reduce((s,vl) => s + (vl.used_bytes||0), 0);
+    const diskTotal = v.disk_used_bytes || 0;
+    return `<tr style="cursor:pointer;" onclick="openVMDetail('${v.name}','${v.namespace}')">
+      <td class="mono" style="color:var(--accent2)">${v.name}</td>
+      <td><span class="badge badge-off" style="max-width:100px;overflow:hidden;text-overflow:ellipsis;">${v.namespace}</span></td>
+      <td>${statusBadge(v.status_group)}</td>
+      <td style="color:var(--txt-secondary);font-size:11px;">${v.node.split('.')[0]}</td>
+      <td class="mono" style="font-size:11px;">${v.ip}</td>
+      <td style="text-align:center;">${v.cpu_cores}</td>
+      <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.cpu_pct)}" style="width:${v.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.cpu_pct)}</span></div></td>
+      <td style="font-size:11px;">${v.memory_total}</td>
+      <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${pbarColor(v.mem_pct)}" style="width:${v.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(v.mem_pct)}</span></div></td>
+      <td class="mono" style="font-size:10px;">${diskTotal ? fmtBytes(diskTotal) : '—'}</td>
+      <td class="mono" style="font-size:10px;">${fmtBps(v.net_rx_bps)}</td>
+      <td class="mono" style="font-size:10px;">${fmtBps(v.net_tx_bps)}</td>
+      <td style="font-size:11px;">${v.age}</td>
+      <td style="font-size:10px;color:var(--accent);text-align:center;">📈</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="14" style="text-align:center;color:var(--txt-muted);padding:24px;">VM 없음</td></tr>';
 }
 document.getElementById('vm-search').addEventListener('input', filterVMs);
 document.getElementById('vm-ns-filter').addEventListener('change', filterVMs);
@@ -2384,6 +3876,89 @@ document.getElementById('vm-status-filter').addEventListener('change', filterVMs
 // RENDER: STORAGE
 // ═══════════════════════════════════════════════
 function renderStorage(st) {
+  const vmMap = st.pvc_vm_map || {};
+
+  // ── Top 5 최대 할당 PV ──────────────────────────────────────
+  const pvsSorted = [...(st.pvs || [])]
+    .filter(p => p.capacity_bytes > 0)
+    .sort((a, b) => b.capacity_bytes - a.capacity_bytes)
+    .slice(0, 5);
+
+  const maxPvBytes = pvsSorted[0]?.capacity_bytes || 1;
+  document.getElementById('top5-pv').innerHTML = pvsSorted.length ? pvsSorted.map((p, i) => {
+    const pct = Math.round(p.capacity_bytes / maxPvBytes * 100);
+    // Claim 형식: "namespace/pvc-name" 또는 "Unbound"
+    const claim = p.Claim || 'Unbound';
+    const isUnbound = claim === 'Unbound';
+    const claimParts = claim.split('/');
+    const claimNs   = claimParts.length > 1 ? claimParts[0] : '—';
+    const claimName = claimParts.length > 1 ? claimParts.slice(1).join('/') : claim;
+    const vmName    = vmMap[claim] || '';
+    const scBadge   = p.Status === 'Bound' ? 'badge-ok' : 'badge-warn';
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--bd);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
+          <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+          <div style="min-width:0;">
+            <div class="mono" style="font-size:11px;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;"
+                 title="${p.Name}">${p.Name}</div>
+            <div style="display:flex;align-items:center;gap:4px;margin-top:2px;flex-wrap:wrap;">
+              ${!isUnbound ? `<span class="badge badge-off" style="font-size:9px;">${claimNs}</span>` : ''}
+              ${!isUnbound ? `<span style="font-size:10px;color:var(--txt-secondary);">${claimName}</span>` : ''}
+              ${vmName ? `<span class="badge badge-ok" style="font-size:9px;">VM: ${vmName}</span>` : ''}
+              ${isUnbound ? `<span class="badge badge-warn" style="font-size:9px;">Unbound</span>` : ''}
+            </div>
+          </div>
+        </div>
+        <span style="font-size:12px;font-weight:700;color:#f59e0b;flex-shrink:0;margin-left:6px;">${fmtBytes(p.capacity_bytes)}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <div class="pbar" style="flex:1;"><div class="pbar-fill" style="background:#f59e0b;width:${pct}%"></div></div>
+        <span class="badge ${scBadge}" style="font-size:9px;">${p.Status}</span>
+        <span style="font-size:9px;color:var(--txt-muted);">${p.StorageClass}</span>
+      </div>
+    </div>`;
+  }).join('') : '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">PV 없음</div>';
+
+  // ── Top 5 실제 사용량 PVC ────────────────────────────────────
+  const pvcsSorted = [...(st.pvcs || [])]
+    .filter(p => p.used_bytes > 0)
+    .sort((a, b) => b.used_bytes - a.used_bytes)
+    .slice(0, 5);
+
+  const maxPvcBytes = pvcsSorted[0]?.used_bytes || 1;
+  document.getElementById('top5-pvc-used').innerHTML = pvcsSorted.length ? pvcsSorted.map((p, i) => {
+    const pct    = Math.round(p.used_bytes / maxPvcBytes * 100);
+    const capPct = p.capacity_bytes ? Math.round(p.used_bytes / p.capacity_bytes * 100) : null;
+    const key    = p.Namespace + '/' + p.Name;
+    const vmName = vmMap[key] || '';
+    const capPctColor = capPct == null ? 'var(--txt-muted)' : capPct < 70 ? 'var(--success)' : capPct < 90 ? 'var(--warn)' : 'var(--danger)';
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--bd);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
+          <span style="color:var(--txt-muted);font-size:11px;font-weight:700;flex-shrink:0;">#${i+1}</span>
+          <div style="min-width:0;">
+            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+              <span class="badge badge-off" style="font-size:9px;">${p.Namespace}</span>
+              <span class="mono" style="font-size:11px;color:var(--txt-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;"
+                    title="${p.Name}">${p.Name}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px;margin-top:2px;">
+              ${vmName ? `<span class="badge badge-ok" style="font-size:9px;">VM: ${vmName}</span>` : '<span style="font-size:10px;color:var(--txt-muted);">VM 미연결</span>'}
+              ${capPct != null ? `<span style="font-size:10px;color:${capPctColor};font-weight:700;">용량의 ${capPct}%</span>` : ''}
+            </div>
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:6px;">
+          <div style="font-size:12px;font-weight:700;color:#34d399;">${fmtBytes(p.used_bytes)}</div>
+          ${p.capacity_bytes ? `<div style="font-size:10px;color:var(--txt-muted);">/ ${fmtBytes(p.capacity_bytes)}</div>` : ''}
+        </div>
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%"></div></div>
+    </div>`;
+  }).join('') : '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">실제 사용량 데이터 없음<br><span style="font-size:10px;">kubelet_volume_stats 수집 필요</span></div>';
+
+  // ── Storage Pools ────────────────────────────────────────────
   document.getElementById('storage-pools').innerHTML = st.pools.map(p => {
     const usedPct = p.total_bytes ? Math.round(p.used_bytes / p.total_bytes * 100) : 0;
     return `<div class="card-sm">
@@ -2628,8 +4203,11 @@ function renderAll(d) {
   document.getElementById('sb-prom-dot').className = `dot ${ps?'dot-ok':'dot-off'}`;
   document.getElementById('sb-updated').textContent = d.last_updated;
 
+  _nodeDataSource = d.node_data_source || 'cli';
+  _nodeNetAvailable = d.node_net_available || false;
   renderOverview(d);
   renderNodes(d.nodes || []);
+  renderNodeCards();
   renderVMs(d.vms || []);
   renderStorage(d.storage || {});
   renderInfra(d.infra || {});
@@ -2637,6 +4215,245 @@ function renderAll(d) {
 }
 
 let _engine_prom_reachable = false;
+
+// ═══════════════════════════════════════════════
+// ALERTS PAGE
+// ═══════════════════════════════════════════════
+let _alertsData = null;
+let _allAlerts = [];
+
+async function fetchAlerts() {
+  try {
+    const d = await fetch('/api/v1/alerts').then(r => r.json());
+    _alertsData = d;
+    _allAlerts = d.alerts || [];
+    renderAlerts(d);
+  } catch(e) { console.error('alerts fetch error', e); }
+}
+
+function renderAlerts(d) {
+  const counts = d.counts || {};
+  const crit = counts.critical || 0, warn = counts.warning || 0,
+        info = counts.info || 0, none = counts.none || 0;
+  const total = _allAlerts.length;
+
+  // KPI
+  document.getElementById('alert-kpi-row').innerHTML = [
+    { label:'Total Firing',  value: total,  color: total>0?'var(--danger)':'var(--success)' },
+    { label:'Critical',      value: crit,   color: crit>0?'var(--danger)':'var(--txt-muted)' },
+    { label:'Warning',       value: warn,   color: warn>0?'var(--warn)':'var(--txt-muted)' },
+    { label:'Info',          value: info,   color: 'var(--accent2)' },
+  ].map(k => `<div class="kpi">
+    <div class="label">${k.label}</div>
+    <div class="value" style="color:${k.color};">${k.value}</div>
+  </div>`).join('');
+
+  // 심각도 분포 바
+  const t = total || 1;
+  document.getElementById('alert-sev-dist').innerHTML = [
+    ['Critical', crit, 'var(--danger)'],
+    ['Warning',  warn, 'var(--warn)'],
+    ['Info',     info, 'var(--accent2)'],
+    ['None',     none, 'var(--txt-muted)'],
+  ].map(([l,c,color]) => `<div style="margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+      <span style="color:var(--txt-secondary);">${l}</span>
+      <span style="color:${color};font-weight:700;">${c}</span>
+    </div>
+    <div class="pbar"><div class="pbar-fill" style="background:${color};width:${Math.round(c/t*100)}%"></div></div>
+  </div>`).join('');
+
+  // 트렌드 차트
+  const trend = d.trend || {};
+  if ((trend.labels||[]).length > 0) {
+    mkChart('chart-alert-trend', trend.labels, [
+      sparkDataset('Total', trend.total||[], '#ef4444'),
+      sparkDataset('Critical', trend.critical||[], '#7f1d1d'),
+    ], {legend:true, yMin:0});
+  }
+
+  // 인시던트 배너 업데이트
+  filterAlerts();
+}
+
+function filterAlerts() {
+  const sev = document.getElementById('alert-sev-filter')?.value || '';
+  const search = (document.getElementById('alert-search')?.value || '').toLowerCase();
+  const filtered = _allAlerts.filter(a =>
+    (!sev || a.severity === sev) &&
+    (!search || a.alertname.toLowerCase().includes(search) || (a.namespace||'').toLowerCase().includes(search))
+  );
+  const sevColor = { critical:'var(--danger)', warning:'var(--warn)', info:'var(--accent2)', none:'var(--txt-muted)' };
+  document.getElementById('tbody-alerts').innerHTML = filtered.map(a => {
+    const c = sevColor[a.severity] || 'var(--txt-muted)';
+    return `<tr>
+      <td><span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}55;">${a.severity.toUpperCase()}</span></td>
+      <td style="font-weight:600;color:var(--txt-primary);">${a.alertname}</td>
+      <td><span class="badge badge-off">${a.namespace||'cluster'}</span></td>
+      <td style="font-size:11px;color:var(--txt-muted);">${a.service||a.pod||'—'}</td>
+      <td style="font-size:11px;color:var(--txt-muted);">${a.node||'—'}</td>
+      <td style="font-size:11px;color:var(--txt-secondary);max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+          title="${a.description||a.summary||''}">${a.summary||a.description||'—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--txt-muted);padding:20px;">Firing 알럿 없음 ✅</td></tr>';
+}
+document.getElementById('alert-sev-filter')?.addEventListener('change', filterAlerts);
+document.getElementById('alert-search')?.addEventListener('input', filterAlerts);
+
+// ═══════════════════════════════════════════════
+// ROUTE SLO PAGE
+// ═══════════════════════════════════════════════
+let _routesData = null;
+
+async function fetchRoutes() {
+  const hours = document.getElementById('slo-hours')?.value || 24;
+  try {
+    const d = await fetch(`/api/v1/routes?hours=${hours}`).then(r => r.json());
+    _routesData = d;
+    renderRoutes(d);
+  } catch(e) { console.error('routes fetch error', e); }
+}
+
+function renderRoutes(d) {
+  const current = d.current || [];
+  const slo = d.slo || [];
+  const up = current.filter(r => r.is_up).length;
+  const down = current.filter(r => !r.is_up).length;
+  const avgLat = current.length ? Math.round(current.reduce((s,r) => s+(r.latency_ms||0),0)/current.length) : 0;
+  const sloAvg = slo.length ? (slo.reduce((s,r) => s+r.slo_pct,0)/slo.length).toFixed(1) : '—';
+
+  // KPI
+  document.getElementById('route-kpi-row').innerHTML = [
+    { label:'Total Routes', value: current.length, color:'var(--txt-primary)' },
+    { label:'Up',           value: up,   color:'var(--success)' },
+    { label:'Down',         value: down, color: down>0?'var(--danger)':'var(--txt-muted)' },
+    { label:'Avg Latency',  value: avgLat+'ms', color:'var(--accent2)' },
+    { label:'Avg SLO',      value: sloAvg+'%',  color: parseFloat(sloAvg)<99?'var(--warn)':'var(--success)' },
+  ].map(k => `<div class="kpi">
+    <div class="label">${k.label}</div>
+    <div class="value" style="color:${k.color};font-size:20px;">${k.value}</div>
+  </div>`).join('');
+
+  // 현재 상태 테이블
+  document.getElementById('tbody-routes-current').innerHTML = current.map(r => {
+    const latC = r.latency_ms < 200 ? 'var(--success)' : r.latency_ms < 1000 ? 'var(--warn)' : 'var(--danger)';
+    const sc = r.status_code || 0;
+    const scColor = sc >= 500 ? 'var(--danger)' : sc >= 400 ? 'var(--warn)' : sc > 0 ? 'var(--success)' : 'var(--txt-muted)';
+    return `<tr>
+      <td class="mono" style="font-size:11px;">${r.name}</td>
+      <td><span class="badge badge-off">${r.namespace}</span></td>
+      <td style="font-size:10px;color:var(--txt-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="${r.host}">${r.host}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:5px;">
+          <span class="dot ${r.is_up?'dot-ok':'dot-err'}"></span>
+          <span class="mono" style="font-size:11px;color:${scColor};">${sc||'—'}</span>
+        </div>
+      </td>
+      <td style="color:${latC};font-family:monospace;font-size:11px;">${r.latency_ms?r.latency_ms.toFixed(0)+'ms':'—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--txt-muted);padding:20px;">Route 없음 (oc login 필요)</td></tr>';
+
+  // SLO 테이블
+  document.getElementById('tbody-routes-slo').innerHTML = slo.map(r => {
+    const sloC = r.slo_pct >= 99.9 ? 'var(--success)' : r.slo_pct >= 99 ? 'var(--accent2)' : r.slo_pct >= 95 ? 'var(--warn)' : 'var(--danger)';
+    return `<tr>
+      <td class="mono" style="font-size:11px;">${r.name}</td>
+      <td><span class="badge badge-off">${r.namespace}</span></td>
+      <td>
+        <div class="pbar-wrap">
+          <div class="pbar"><div class="pbar-fill" style="background:${sloC};width:${r.slo_pct}%"></div></div>
+          <span style="font-size:11px;font-weight:700;color:${sloC};width:50px;">${r.slo_pct}%</span>
+        </div>
+      </td>
+      <td class="mono" style="font-size:11px;">${r.avg_latency_ms}ms</td>
+      <td style="font-size:11px;color:var(--txt-muted);">${r.total_probes}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--txt-muted);padding:20px;">이력 없음 (수집 중)</td></tr>';
+
+  // UWM 상태
+  renderUWM();
+}
+
+async function renderUWM() {
+  try {
+    const uwm = await fetch('/api/v1/uwm').then(r => r.json());
+    const el = document.getElementById('uwm-content');
+    if (!el) return;
+    if (uwm.enabled) {
+      el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <span class="dot dot-ok"></span>
+        <span style="font-weight:700;color:var(--success);">활성화됨</span>
+        <span style="font-size:11px;color:var(--txt-muted);">Prometheus ${uwm.prometheus_count}개</span>
+      </div>
+      ${uwm.targets?.length ? `<div style="font-size:11px;color:var(--txt-secondary);margin-bottom:6px;">수집 중인 사용자 네임스페이스:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${uwm.targets.map(t => `<span class="badge badge-ok">${t.namespace} (${t.count})</span>`).join('')}
+      </div>` : '<div style="font-size:11px;color:var(--txt-muted);">수집 대상 없음</div>'}`;
+    } else {
+      el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <span class="dot dot-off"></span>
+        <span style="color:var(--txt-muted);font-weight:700;">비활성화됨</span>
+      </div>
+      <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);border-radius:7px;padding:12px;">
+        <div style="font-size:11px;font-weight:700;color:var(--accent);margin-bottom:6px;">활성화 방법:</div>
+        <code style="font-size:10px;color:var(--txt-secondary);display:block;line-height:1.6;">
+          oc -n openshift-monitoring edit configmap cluster-monitoring-config<br>
+          # enableUserWorkload: true 추가
+        </code>
+      </div>`;
+    }
+  } catch(e) {}
+}
+
+document.getElementById('slo-hours')?.addEventListener('change', fetchRoutes);
+
+// ═══════════════════════════════════════════════
+// INCIDENTS PAGE
+// ═══════════════════════════════════════════════
+async function fetchIncidents() {
+  try {
+    const d = await fetch('/api/v1/incidents').then(r => r.json());
+    renderIncidents(d);
+    // 인시던트 배너 업데이트
+    const banner = document.getElementById('incident-banner');
+    const bannerList = document.getElementById('incident-banner-list');
+    if (banner && bannerList && d.active?.length > 0) {
+      banner.style.display = '';
+      bannerList.innerHTML = d.active.slice(0,3).map(i =>
+        `<div style="font-size:11px;color:var(--txt-secondary);">• ${i.title} (${i.started_at})</div>`
+      ).join('');
+    } else if (banner) {
+      banner.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+function renderIncidents(d) {
+  const sevColor = { critical:'var(--danger)', warning:'var(--warn)', info:'var(--accent2)' };
+  const mkCard = (inc) => {
+    const c = sevColor[inc.severity] || 'var(--txt-muted)';
+    return `<div style="background:var(--bg-card2);border:1px solid ${c}33;border-radius:8px;padding:12px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}55;font-size:9px;">${(inc.severity||'').toUpperCase()}</span>
+          <span style="font-size:12px;font-weight:700;color:var(--txt-primary);">${inc.title}</span>
+        </div>
+        <span style="font-size:10px;color:var(--txt-muted);">${inc.started_at}</span>
+      </div>
+      <div style="font-size:11px;color:var(--txt-secondary);margin-bottom:4px;">영향: ${inc.affected||'—'}</div>
+      ${inc.description?`<div style="font-size:10px;color:var(--txt-muted);">${inc.description}</div>`:''}
+      ${inc.resolved_at?`<div style="font-size:10px;color:var(--success);margin-top:4px;">✅ 해소: ${inc.resolved_at}</div>`:''}
+    </div>`;
+  };
+  const activeEl = document.getElementById('incidents-active');
+  const resolvedEl = document.getElementById('incidents-resolved');
+  if (activeEl) activeEl.innerHTML = (d.active||[]).length
+    ? d.active.map(mkCard).join('')
+    : '<div style="text-align:center;padding:20px;color:var(--success);">✅ 활성 인시던트 없음</div>';
+  if (resolvedEl) resolvedEl.innerHTML = (d.resolved||[]).length
+    ? d.resolved.map(mkCard).join('')
+    : '<div style="text-align:center;padding:20px;color:var(--txt-muted);">해소된 인시던트 없음</div>';
+}
 
 // ═══════════════════════════════════════════════
 // AUTO-REFRESH + COUNTDOWN
@@ -2651,6 +4468,10 @@ function startCountdown() {
       state.countdown = POLL_INTERVAL;
       fetchAll();
       if (state.currentPage === 'collector') fetchCollector();
+      if (state.currentPage === 'alerts') fetchAlerts();
+      if (state.currentPage === 'routes') fetchRoutes();
+      if (state.currentPage === 'incidents') fetchIncidents();
+      fetchIncidents(); // 인시던트 배너 항상 갱신
     }
   }, 1000);
 }
@@ -2669,6 +4490,8 @@ async function init() {
         document.getElementById('app').style.display = '';
         startCountdown();
         fetchAll();  // 비동기로 데이터 로드 시작
+        loadNodeConditions();
+        fetchIncidents();       // 인시던트 배너 초기 로드
         return;
       }
     } catch(e) { /* 서버 아직 준비 안됨 */ }
