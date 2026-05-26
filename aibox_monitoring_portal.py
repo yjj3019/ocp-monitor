@@ -271,7 +271,8 @@ class SQLiteManager:
                 CREATE TABLE IF NOT EXISTS node_metrics_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
-                    node_name TEXT, cpu_pct REAL, mem_pct REAL, status TEXT
+                    node_name TEXT, cpu_pct REAL, mem_pct REAL, status TEXT,
+                    net_rx_bps REAL DEFAULT NULL, net_tx_bps REAL DEFAULT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_nmh_ts ON node_metrics_history(timestamp);
 
@@ -371,8 +372,9 @@ class SQLiteManager:
             # 노드 메트릭
             for n in metrics.nodes:
                 c.execute(
-                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status) VALUES (?,?,?,?,?)",
-                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status),
+                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status,net_rx_bps,net_tx_bps) VALUES (?,?,?,?,?,?,?)",
+                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status,
+                     getattr(n,"net_rx_bps",None), getattr(n,"net_tx_bps",None)),
                 )
             # VM 밀집도 (노드별 VM 수)
             density: Dict[str, int] = {}
@@ -433,7 +435,7 @@ class SQLiteManager:
                 c.execute(
                     "INSERT INTO metric_collection_log (cycle_id,metric_name,status,item_count,duration_ms,error_msg) "
                     "VALUES (?,?,?,?,?,?)",
-                    (cycle_id, r.name, r.status, (int(r.count) if isinstance(r.count, int) else (len(r.count) if hasattr(r.count, "__len__") else 0)), r.duration_ms, r.error),
+                    (cycle_id, r.name, r.status, r.count, r.duration_ms, r.error),
                 )
 
     def store_prometheus_ping(self, strategy: str, host: str, latency_ms: float, reachable: bool) -> None:
@@ -605,14 +607,16 @@ class SQLiteManager:
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT timestamp, cpu_pct, mem_pct FROM node_metrics_history "
+                "SELECT timestamp, cpu_pct, mem_pct, net_rx_bps, net_tx_bps FROM node_metrics_history "
                 "WHERE node_name=? AND timestamp > ? ORDER BY timestamp ASC",
                 (node_name, cutoff),
             ).fetchall()
-        labels = [r["timestamp"][11:16] for r in rows]
-        cpu    = [r["cpu_pct"] for r in rows]
-        mem    = [r["mem_pct"] for r in rows]
-        return {"labels": labels, "cpu": cpu, "mem": mem,
+        labels  = [r["timestamp"][11:16] for r in rows]
+        cpu     = [r["cpu_pct"] for r in rows]
+        mem     = [r["mem_pct"] for r in rows]
+        net_rx  = [r["net_rx_bps"] if "net_rx_bps" in r.keys() else None for r in rows]
+        net_tx  = [r["net_tx_bps"] if "net_tx_bps" in r.keys() else None for r in rows]
+        return {"labels": labels, "cpu": cpu, "mem": mem, "net_rx": net_rx, "net_tx": net_tx,
                 "source": "sqlite_cli", "node": node_name,
                 "point_count": len(rows)}
 
@@ -908,23 +912,67 @@ class MetricsCollector:
         result.duration_ms = (time.time() - t0) * 1000
         return result
 
+    def _parse_cpu_cores(self, s: str) -> float:
+        """'2340m' → 2.34, '11831874863n' → 11.83, '2' → 2.0"""
+        s = s.strip()
+        if s.endswith("n"):
+            try: return int(s[:-1]) / 1_000_000_000
+            except Exception: return 0.0
+        if s.endswith("m"):
+            try: return int(s[:-1]) / 1000
+            except Exception: return 0.0
+        try: return float(s)
+        except Exception: return 0.0
+
     def fetch_nodes(self) -> int:
         try:
             vj = self._run(["oc", "version", "-o", "json"])
             if vj:
                 try: self.metrics.ocp_version = json.loads(vj).get("openshiftVersion", "N/A") or "N/A"
                 except Exception: pass
-            top = self._run(["oc", "adm", "top", "nodes", "--no-headers"])
-            nu: Dict[str, Dict[str, str]] = {}
-            for line in top.split("\n"):
-                p = line.split()
-                if len(p) >= 5:
-                    try: cpu_pct_val = float(p[2].rstrip("%"))
-                    except Exception: cpu_pct_val = None
-                    try: mem_pct_val = float(p[4].rstrip("%"))
-                    except Exception: mem_pct_val = None
-                    nu[p[0]] = {"cpu": p[1], "mem": p[3],
-                                "cpu_pct": cpu_pct_val, "mem_pct": mem_pct_val}
+
+            # ── 전략 1: Metrics Server API 직접 (구조화된 JSON) ──────
+            nu: Dict[str, Dict] = {}
+            ms_raw = self._run(
+                ["oc", "get", "--raw", "/apis/metrics.k8s.io/v1beta1/nodes"],
+                timeout=15, silent=True
+            )
+            if ms_raw:
+                try:
+                    ms_data = json.loads(ms_raw)
+                    for item in ms_data.get("items", []):
+                        name = item["metadata"]["name"]
+                        usage = item.get("usage", {})
+                        cpu_cores = self._parse_cpu_cores(usage.get("cpu", "0"))
+                        mem_bytes = self._parse_bytes(usage.get("memory", "0"))
+                        nu[name] = {
+                            "cpu": usage.get("cpu", "N/A"),
+                            "mem": usage.get("memory", "N/A"),
+                            "cpu_cores": cpu_cores,
+                            "mem_bytes": mem_bytes,
+                            "cpu_pct": None,  # 노드 capacity와 결합해 계산
+                            "mem_pct": None,
+                            "source": "metrics_api",
+                        }
+                    logger.info("Metrics Server API: %d개 노드 수집", len(nu))
+                except Exception as e:
+                    logger.warning("Metrics Server API 파싱 실패: %s", e)
+                    nu = {}
+
+            # ── 전략 2: oc adm top (fallback) ──────────────────────
+            if not nu:
+                top = self._run(["oc", "adm", "top", "nodes", "--no-headers"])
+                for line in top.split("\n"):
+                    p = line.split()
+                    if len(p) >= 5:
+                        try: cpu_pct_val = float(p[2].rstrip("%"))
+                        except Exception: cpu_pct_val = None
+                        try: mem_pct_val = float(p[4].rstrip("%"))
+                        except Exception: mem_pct_val = None
+                        nu[p[0]] = {"cpu": p[1], "mem": p[3],
+                                    "cpu_pct": cpu_pct_val, "mem_pct": mem_pct_val,
+                                    "source": "oc_top"}
+                logger.info("oc adm top fallback: %d개 노드", len(nu))
             nj = self._run(["oc", "get", "nodes", "-o", "json"])
             if not nj: return 0
             tc = 0
@@ -938,15 +986,26 @@ class MetricsCollector:
                 status = "Ready" if ready.get("status") == "True" else "NotReady"
                 cap_b = self._parse_bytes(node.get("status", {}).get("capacity", {}).get("memory", "0"))
                 tc += cap_b
-                usage = nu.get(name, {"cpu": "N/A", "mem": "N/A"})
+                usage = nu.get(name, {"cpu": "N/A", "mem": "N/A", "source": "none"})
+                # Metrics Server API: capacity 기반 % 계산
+                cpu_pct = usage.get("cpu_pct")
+                mem_pct = usage.get("mem_pct")
+                if usage.get("source") == "metrics_api" and cap_b > 0:
+                    cap_cpu = float(node.get("status",{}).get("capacity",{}).get("cpu","0") or 0)
+                    cpu_cores_used = usage.get("cpu_cores", 0)
+                    if cap_cpu > 0:
+                        cpu_pct = round(cpu_cores_used / cap_cpu * 100, 1)
+                    mem_bytes_used = usage.get("mem_bytes", 0)
+                    if mem_bytes_used > 0:
+                        mem_pct = round(mem_bytes_used / cap_b * 100, 1)
                 nodes.append(NodeMetrics(
                     name=name, cpu_usage=usage.get("cpu","N/A"),
                     memory_usage=usage.get("mem","N/A"),
                     status=status, roles=roles,
                     age=self._fmt_age(node["metadata"]["creationTimestamp"]),
                     memory_bytes=cap_b,
-                    cpu_pct_realtime=usage.get("cpu_pct"),
-                    memory_pct_realtime=usage.get("mem_pct"),
+                    cpu_pct_realtime=cpu_pct,
+                    memory_pct_realtime=mem_pct,
                 ))
             self.metrics.nodes = nodes
             self.metrics.global_memory_total = self._fmt_bytes(tc)
@@ -994,11 +1053,24 @@ class MetricsCollector:
                 domain = vm.get("spec", {}).get("template", {}).get("spec", {}).get("domain", {})
                 cpu_c = str(domain.get("cpu", {}).get("cores", "N/A"))
                 mem_t = domain.get("resources", {}).get("requests", {}).get("memory", "N/A")
-                vols = [
-                    {"name": v.get("name", "N/A"),
-                     "pvc": v.get("persistentVolumeClaim", {}).get("claimName", "N/A")}
-                    for v in vm.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
-                ]
+                # DataVolume, PVC, ConfigMap 등 모든 볼륨 타입 파싱
+                vols = []
+                for v in vm.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", []):
+                    vol_name = v.get("name", "N/A")
+                    # 1. persistentVolumeClaim
+                    pvc_ref = v.get("persistentVolumeClaim", {}).get("claimName", "")
+                    # 2. dataVolume (DataVolume은 동일 이름의 PVC 자동 생성)
+                    dv_ref = v.get("dataVolume", {}).get("name", "")
+                    # 3. dataVolumeTemplates 내의 볼륨 (이미 위에서 처리됨)
+                    pvc_name = pvc_ref or dv_ref or "N/A"
+                    vol_type = ("pvc" if pvc_ref else
+                                "datavolume" if dv_ref else
+                                next(iter(set(v.keys()) - {"name"}), "unknown"))
+                    vols.append({
+                        "name": vol_name,
+                        "pvc": pvc_name,
+                        "type": vol_type,
+                    })
                 vi = vmis.get((name, ns), {})
                 vms.append(VMMetrics(
                     name=name, namespace=ns, status=status, cpu_cores=cpu_c, memory_total=mem_t,
@@ -1252,24 +1324,29 @@ class MetricsCollector:
                             nrt.setdefault(name, {})[k] = val
                     except Exception: pass
 
-        # ── NetObserv 노드 네트워크 ──────────────────────────────
+        # ── NetObserv 노드 네트워크 수집 ──
         netobserv_rx: dict = {}
         netobserv_tx: dict = {}
         try:
-            for item in self._query('sum by(SrcK8S_HostName)(rate(netobserv_node_ingress_bytes_total[5m]))'):
-                node = item.get("metric", {}).get("SrcK8S_HostName", "")
-                if node:
-                    try: netobserv_rx[node] = float(item["value"][1])
+            for _ni in self._query(
+                'sum by(SrcK8S_HostName)(rate(netobserv_node_ingress_bytes_total[5m]))'
+            ):
+                _nn = _ni.get("metric", {}).get("SrcK8S_HostName", "")
+                if _nn:
+                    try: netobserv_rx[_nn] = float(_ni["value"][1])
                     except Exception: pass
-            for item in self._query('sum by(SrcK8S_HostName)(rate(netobserv_node_egress_bytes_total[5m]))'):
-                node = item.get("metric", {}).get("SrcK8S_HostName", "")
-                if node:
-                    try: netobserv_tx[node] = float(item["value"][1])
+            for _ni in self._query(
+                'sum by(SrcK8S_HostName)(rate(netobserv_node_egress_bytes_total[5m]))'
+            ):
+                _nn = _ni.get("metric", {}).get("SrcK8S_HostName", "")
+                if _nn:
+                    try: netobserv_tx[_nn] = float(_ni["value"][1])
                     except Exception: pass
             if netobserv_rx:
                 logger.info("NetObserv 노드 네트워크: %d개 수집", len(netobserv_rx))
-        except Exception as e:
-            logger.debug("NetObserv 노드 쿼리 실패: %s", e)
+        except Exception as _e:
+            logger.debug("NetObserv 노드 쿼리 실패: %s", _e)
+
         for n in self.metrics.nodes:
             d = nrt.get(n.name, {})
             # Prometheus 값 우선, 없으면 oc top 값 유지
@@ -1280,39 +1357,38 @@ class MetricsCollector:
             n.net_rx_bps = netobserv_rx.get(n.name) or d.get("net_rx")
             n.net_tx_bps = netobserv_tx.get(n.name) or d.get("net_tx")
 
-        logger.info("노드 수집 — CPU/MEM: Metrics API ✅ | Prometheus node-exporter: %d개(미노출 정상) | NetObserv Net: rx=%d tx=%d노드",
+        logger.info("노드 수집 — Prometheus: %d개 | NetObserv Net: rx=%d tx=%d노드",
                     len(nrt), len(netobserv_rx), len(netobserv_tx))
         return len(nrt)
 
     def fetch_vm_realtime(self) -> int:
         if not self.metrics.vms or not self._prom_strategy: return 0
-        # NetObserv workload 메트릭으로 VM 네트워크 보완
+        # NetObserv workload 네트워크 수집
         netobserv_vm_rx: dict = {}
         netobserv_vm_tx: dict = {}
         try:
-            for item in self._query(
+            for _vi in self._query(
                 'sum by(SrcK8S_Namespace,SrcK8S_OwnerName)'
                 '(rate(netobserv_workload_ingress_bytes_total[5m]))'
             ):
-                m = item.get("metric", {})
-                key = (m.get("SrcK8S_Namespace",""), m.get("SrcK8S_OwnerName",""))
-                if key[0] and key[1]:
-                    try: netobserv_vm_rx[key] = float(item["value"][1])
+                _vm = _vi.get("metric", {})
+                _vk = (_vm.get("SrcK8S_Namespace",""), _vm.get("SrcK8S_OwnerName",""))
+                if _vk[0] and _vk[1]:
+                    try: netobserv_vm_rx[_vk] = float(_vi["value"][1])
                     except Exception: pass
-            for item in self._query(
+            for _vi in self._query(
                 'sum by(SrcK8S_Namespace,SrcK8S_OwnerName)'
                 '(rate(netobserv_workload_egress_bytes_total[5m]))'
             ):
-                m = item.get("metric", {})
-                key = (m.get("SrcK8S_Namespace",""), m.get("SrcK8S_OwnerName",""))
-                if key[0] and key[1]:
-                    try: netobserv_vm_tx[key] = float(item["value"][1])
+                _vm = _vi.get("metric", {})
+                _vk = (_vm.get("SrcK8S_Namespace",""), _vm.get("SrcK8S_OwnerName",""))
+                if _vk[0] and _vk[1]:
+                    try: netobserv_vm_tx[_vk] = float(_vi["value"][1])
                     except Exception: pass
             if netobserv_vm_rx:
                 logger.info("NetObserv VM 네트워크: %d개 수집", len(netobserv_vm_rx))
-        except Exception as e:
-            logger.debug("NetObserv VM 쿼리 실패: %s", e)
-
+        except Exception as _e:
+            logger.debug("NetObserv VM 쿼리 실패: %s", _e)
         queries = {
             "cpu_pct": "rate(kubevirt_vmi_cpu_usage_seconds_total[5m]) * 100",
             "mem_used": "kubevirt_vmi_memory_used_bytes",
@@ -1340,10 +1416,9 @@ class MetricsCollector:
             if ma > 0:
                 vm.memory_usage_pct = mu / ma * 100
                 vm.memory_used_bytes = int(mu)
-            # NetObserv 값 우선, 없으면 kubevirt 메트릭
-            vm_key = (vm.namespace, vm.name)
-            vm.net_rx_bps = netobserv_vm_rx.get(vm_key) or d.get("net_rx")
-            vm.net_tx_bps = netobserv_vm_tx.get(vm_key) or d.get("net_tx")
+            _vkey = (vm.namespace, vm.name)
+            vm.net_rx_bps = netobserv_vm_rx.get(_vkey) or d.get("net_rx")
+            vm.net_tx_bps = netobserv_vm_tx.get(_vkey) or d.get("net_tx")
             vm.disk_read_bps = d.get("disk_r")
             vm.disk_write_bps = d.get("disk_w")
         return len(rt)
@@ -1395,6 +1470,8 @@ class MetricsCollector:
             ("alerts_detail", self.fetch_alerts_detail),
             ("route_probes", self.fetch_route_probes),
             ("uwm_status", self.fetch_uwm_status),
+            ("vm_pod_metrics", self.fetch_vm_pod_metrics),
+            ("openshift_state", self.fetch_openshift_state_metrics),
         ]
         results = []
         for name, fn in steps:
@@ -1661,6 +1738,128 @@ class MetricsCollector:
     # ─────────────────────────────────────────────────────────
     # Incident 자동 감지
     # ─────────────────────────────────────────────────────────
+    def fetch_openshift_state_metrics(self) -> int:
+        """
+        openshift-state-metrics 메트릭 수집:
+          - openshift_namespace_phase (네임스페이스 상태)
+          - openshift_clusterresourcequota_* (클러스터 리소스 쿼터)
+        Thanos 우선, 없으면 oc get --raw으로 직접 수집.
+        """
+        result: Dict[str, Any] = {
+            "namespaces": [],
+            "quotas": [],
+            "source": "none",
+        }
+
+        # ── 네임스페이스 상태 (Thanos) ──────────────────────────
+        if self._prom_strategy:
+            ns_items = self._query("openshift_namespace_phase")
+            if ns_items:
+                ns_map: Dict[str, Dict] = {}
+                for item in ns_items:
+                    lbl = item.get("metric", {})
+                    ns = lbl.get("namespace", "")
+                    phase = lbl.get("phase", "")
+                    try: val = float(item["value"][1])
+                    except Exception: val = 0
+                    if ns and val > 0:
+                        ns_map[ns] = {"namespace": ns, "phase": phase, "active": phase == "Active"}
+                result["namespaces"] = list(ns_map.values())
+                result["source"] = "thanos"
+
+            # ClusterResourceQuota (Thanos)
+            quota_metrics = {
+                "hard_cpu":    'openshift_clusterresourcequota_cpu_hard',
+                "used_cpu":    'openshift_clusterresourcequota_cpu_used',
+                "hard_mem":    'openshift_clusterresourcequota_memory_hard_bytes',
+                "used_mem":    'openshift_clusterresourcequota_memory_used_bytes',
+                "hard_pods":   'openshift_clusterresourcequota_pods_hard',
+                "used_pods":   'openshift_clusterresourcequota_pods_used',
+                "hard_pvc":    'openshift_clusterresourcequota_persistentvolumeclaims_hard',
+                "used_pvc":    'openshift_clusterresourcequota_persistentvolumeclaims_used',
+            }
+            qdata: Dict[str, Dict] = {}
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futs = {ex.submit(self._query, q): k for k, q in quota_metrics.items()}
+                for fut in as_completed(futs):
+                    k = futs[fut]
+                    for item in fut.result():
+                        lbl = item.get("metric", {})
+                        name = lbl.get("name", lbl.get("clusterresourcequota", ""))
+                        if not name: continue
+                        try: val = float(item["value"][1])
+                        except Exception: val = 0
+                        qdata.setdefault(name, {"name": name})[k] = val
+            if qdata:
+                result["quotas"] = list(qdata.values())
+                result["source"] = "thanos"
+
+        # ── Fallback: oc get clusterresourcequota ───────────────
+        if not result["quotas"]:
+            raw = self._run(
+                ["oc", "get", "clusterresourcequota", "-o", "json"],
+                timeout=15, silent=True,
+            )
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    for item in data.get("items", []):
+                        name = item["metadata"]["name"]
+                        spec_hard = item.get("spec", {}).get("quota", {}).get("hard", {})
+                        status = item.get("status", {})
+                        total_hard = status.get("total", {}).get("hard", {})
+                        total_used = status.get("total", {}).get("used", {})
+                        namespaces = [
+                            ns["namespace"]
+                            for ns in status.get("namespaces", [])
+                        ]
+                        def _cpu(s: str) -> float:
+                            return self._parse_cpu_cores(s) if s else 0
+                        def _mem(s: str) -> int:
+                            return self._parse_bytes(s) if s else 0
+                        result["quotas"].append({
+                            "name": name,
+                            "namespaces": namespaces,
+                            "hard_cpu":  _cpu(total_hard.get("requests.cpu", total_hard.get("cpu","0"))),
+                            "used_cpu":  _cpu(total_used.get("requests.cpu", total_used.get("cpu","0"))),
+                            "hard_mem":  _mem(total_hard.get("requests.memory", total_hard.get("memory","0"))),
+                            "used_mem":  _mem(total_used.get("requests.memory", total_used.get("memory","0"))),
+                            "hard_pods": int(float(total_hard.get("pods","0") or 0)),
+                            "used_pods": int(float(total_used.get("pods","0") or 0)),
+                            "hard_pvc":  int(float(total_hard.get("persistentvolumeclaims","0") or 0)),
+                            "used_pvc":  int(float(total_used.get("persistentvolumeclaims","0") or 0)),
+                        })
+                    result["source"] = "oc_cli"
+                    logger.info("ClusterResourceQuota: oc CLI %d개 수집", len(result["quotas"]))
+                except Exception as e:
+                    logger.warning("ClusterResourceQuota 파싱 실패: %s", e)
+
+        # ── Fallback: namespace Phase 직접 수집 ─────────────────
+        if not result["namespaces"]:
+            raw = self._run(
+                ["oc", "get", "namespaces", "-o",
+                 "jsonpath={range .items[*]}{.metadata.name},{.status.phase}\n{end}"],
+                timeout=15, silent=True,
+            )
+            if raw:
+                ns_list = []
+                for line in raw.splitlines():
+                    parts = line.split(",")
+                    if len(parts) >= 2:
+                        ns_list.append({
+                            "namespace": parts[0],
+                            "phase": parts[1],
+                            "active": parts[1] == "Active",
+                        })
+                result["namespaces"] = ns_list
+                if not result.get("source") or result["source"] == "none":
+                    result["source"] = "oc_cli"
+
+        self.metrics._osm = result
+        logger.info("OpenShift state metrics: NS=%d Quotas=%d source=%s",
+                    len(result["namespaces"]), len(result["quotas"]), result["source"])
+        return len(result["namespaces"]) + len(result["quotas"])
+
     def detect_incidents(self, db) -> List[Dict]:
         """알럿 + 노드 상태 기반 인시던트 자동 감지 및 SQLite 기록"""
         incidents_detected = []
@@ -1699,6 +1898,84 @@ class MetricsCollector:
 
         return incidents_detected
 
+    def fetch_vm_pod_metrics(self) -> int:
+        """
+        Metrics Server API로 virt-launcher Pod CPU/MEM 수집.
+        Prometheus 불가 환경에서 VM 실시간 자원 사용량을 가져오는 대체 수단.
+        /apis/metrics.k8s.io/v1beta1/pods?labelSelector=kubevirt.io/domain={vmname}
+        """
+        # namespace별 VM 그룹화
+        ns_vms: Dict[str, List[str]] = {}
+        for vm in self.metrics.vms:
+            if vm.status_group == "running":
+                ns_vms.setdefault(vm.namespace, []).append(vm.name)
+        if not ns_vms:
+            return 0
+
+        pod_metrics: Dict[str, Dict] = {}  # (ns, vm_name) → {cpu_m, mem_bytes}
+
+        def _fetch_ns_pods(ns: str) -> Dict[str, Dict]:
+            raw = self._run(
+                ["oc", "get", "--raw",
+                 f"/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods"],
+                timeout=15, silent=True,
+            )
+            if not raw: return {}
+            result: Dict[str, Dict] = {}
+            try:
+                data = json.loads(raw)
+                for item in data.get("items", []):
+                    lbl = item.get("metadata", {}).get("labels", {})
+                    vm_name = lbl.get("kubevirt.io/domain", "")
+                    if not vm_name or vm_name not in ns_vms.get(ns, []):
+                        continue
+                    # 컨테이너 합산 (compute + guest-console 등)
+                    cpu_total, mem_total = 0, 0
+                    for c in item.get("containers", []):
+                        usage = c.get("usage", {})
+                        cpu_total += self._parse_cpu_cores(usage.get("cpu","0"))
+                        mem_total += self._parse_bytes(usage.get("memory","0"))
+                    result[(ns, vm_name)] = {
+                        "cpu_cores": cpu_total,
+                        "mem_bytes": mem_total,
+                    }
+            except Exception as e:
+                logger.debug("Pod metrics parse error %s: %s", ns, e)
+            return result
+
+        with ThreadPoolExecutor(max_workers=min(len(ns_vms), 6)) as ex:
+            futs = [ex.submit(_fetch_ns_pods, ns) for ns in ns_vms]
+            for fut in as_completed(futs):
+                try: pod_metrics.update(fut.result())
+                except Exception: pass
+
+        if not pod_metrics:
+            logger.info("VM Pod metrics: Metrics Server 없음 → Prometheus fallback")
+            return 0
+
+        # VM에 주입 (cpu_pct는 vm.cpu_cores 기반으로 계산)
+        updated = 0
+        for vm in self.metrics.vms:
+            key = (vm.namespace, vm.name)
+            if key not in pod_metrics: continue
+            pm = pod_metrics[key]
+            # cpu_pct: 할당된 vCPU 대비 사용 비율
+            try:
+                vcpu = int(vm.cpu_cores) if vm.cpu_cores != "N/A" else 1
+            except Exception:
+                vcpu = 1
+            if vcpu > 0 and pm["cpu_cores"] > 0:
+                vm.cpu_usage_pct = round(pm["cpu_cores"] / vcpu * 100, 1)
+            # mem_pct: 요청 메모리 대비 사용 비율
+            mem_request = self._parse_bytes(vm.memory_total) if vm.memory_total != "N/A" else 0
+            if mem_request > 0 and pm["mem_bytes"] > 0:
+                vm.memory_usage_pct = round(pm["mem_bytes"] / mem_request * 100, 1)
+                vm.memory_used_bytes = pm["mem_bytes"]
+            updated += 1
+
+        logger.info("VM Pod metrics (Metrics API): %d개 VM 업데이트", updated)
+        return updated
+
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """FastAPI가 소비할 JSON-직렬화 가능 스냅샷 반환"""
         m = self.metrics
@@ -1716,6 +1993,7 @@ class MetricsCollector:
                 "coredns": h.coredns,
                 "etcd_leader": h.etcd_leader,
             },
+            "metrics_api_source": getattr(m, "_metrics_api_source", "cli"),
             "counts": {
                 "nodes": len(m.nodes),
                 "vms_total": len(m.vms),
@@ -1775,6 +2053,7 @@ class MetricsCollector:
                 "pvcs": [
                     {
                         **p,
+                        "requested_bytes": MetricsCollector._parse_bytes(p.get("Requested", "0")),
                         "used_bytes": m.pvc_disk_stats.get(
                             f"{p.get('Namespace','')}/{p.get('Name','')}", {}
                         ).get("used", 0),
@@ -1785,12 +2064,7 @@ class MetricsCollector:
                     for p in m.pvc_data
                 ],
                 "pvc_disk_source": getattr(m, "_pvc_disk_source", "none"),
-                "pvc_vm_map": {
-                    f"{vm.namespace}/{vol.get('pvc','')}": vm.name
-                    for vm in m.vms
-                    for vol in vm.volumes
-                    if vol.get("pvc") and vol.get("pvc") != "N/A"
-                },
+                "pvc_vm_map": (lambda: _build_pvc_vm_map(m.vms))(),
             },
             "infra": {
                 "router": {
@@ -1886,6 +2160,11 @@ class PollingEngine:
                 status = "failed"
 
             duration_ms = (time.time() - t0) * 1000
+            # item_count를 int로 강제 변환
+            for _r in results:
+                if isinstance(_r.count, (list, tuple)): _r.count = len(_r.count)
+                elif isinstance(_r.count, dict): _r.count = len(_r.count)
+                elif not isinstance(_r.count, int): _r.count = 0
             self.db.finish_cycle(cycle_id, duration_ms, status, results)
 
             # Prometheus ping 기록
@@ -2364,6 +2643,30 @@ details summary{cursor:pointer;font-size:12px;color:#7dd3fc;margin-bottom:8px}
 # 7. FASTAPI APPLICATION
 # ════════════════════════════════════════════════════════════════════
 
+def _build_pvc_vm_map(vms) -> Dict[str, str]:
+    """
+    PVC → VM 이름 매핑 빌드.
+    KubeVirt DataVolume 패턴 (dv-{name}, {name}-disk, rootdisk 등) 포함.
+    """
+    result: Dict[str, str] = {}
+    for vm in vms:
+        ns = vm.namespace
+        # 1. volumes에 명시된 PVC
+        for vol in vm.volumes:
+            pvc = vol.get("pvc", "")
+            if pvc and pvc != "N/A":
+                result[f"{ns}/{pvc}"] = vm.name
+        # 2. DataVolume 추론: 'dv-{vm_name}' 또는 '{vm_name}-rootdisk' 패턴
+        for prefix in ["dv-", ""]:
+            for suffix in ["", "-rootdisk", "-disk", "-data"]:
+                candidate = f"{prefix}{vm.name}{suffix}"
+                key = f"{ns}/{candidate}"
+                if key not in result:
+                    result[key] = vm.name
+        # 3. PVC 이름에 vm.name이 포함된 경우 (fuzzy)
+        #    → 렌더링 시 처리 (백엔드에서 vm_name_list 전달)
+    return result
+
 def _sanitize_json(obj):
     """inf/nan 등 JSON 비호환 float → None 재귀 치환"""
     import math
@@ -2552,6 +2855,23 @@ def api_node_conditions():
 def api_vm_trends(namespace: str, vm_name: str, hours: int = Query(1, ge=1, le=24)):
     data = _collector.query_vm_trends(vm_name, namespace, hours)
     return JSONResponse(MetricsCollector._sanitize(data))
+
+# ── OpenShift State Metrics / Quotas ─────────────────────────────
+@app.get("/api/v1/quotas")
+def api_quotas():
+    osm = _sanitize_json(getattr(_collector.metrics, "_osm", {}))
+    cache = _engine.get_cache()
+    # namespace별 Pod 수 계산 (VM + 일반 Pod 구분)
+    ns_vm_count: Dict[str, int] = {}
+    for vm in cache.get("vms", []):
+        ns = vm.get("namespace","")
+        ns_vm_count[ns] = ns_vm_count.get(ns, 0) + 1
+    return JSONResponse({
+        "quotas":     osm.get("quotas", []),
+        "namespaces": osm.get("namespaces", []),
+        "source":     osm.get("source", "none"),
+        "ns_vm_count": ns_vm_count,
+    })
 
 # ── Alerts Detail ────────────────────────────────────────────────
 @app.get("/api/v1/alerts")
@@ -2791,6 +3111,10 @@ SPA_HTML = r"""<!DOCTYPE html>
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
         Route SLO
       </div>
+      <div class="sb-item" data-page="quotas">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 11h.01M12 11h.01M15 11h.01M12 7h.01M15 7h.01M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        Quotas
+      </div>
       <div class="sb-item" data-page="incidents">
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
         Incidents
@@ -2998,7 +3322,12 @@ SPA_HTML = r"""<!DOCTYPE html>
 
       <!-- PAGE: STORAGE -->
       <div id="page-storage" class="page" style="display:none;">
-        <!-- Top 5 패널 -->
+        <!-- 1. Storage Pools -->
+        <div class="card" style="margin-bottom:14px;">
+          <div class="sec-title">Storage Pools</div>
+          <div id="storage-pools" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;"></div>
+        </div>
+        <!-- 2. Top 5 패널 (Pools 아래, PV/PVC 위) -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
           <div class="card">
             <div class="sec-title" style="color:#f59e0b;">
@@ -3015,10 +3344,7 @@ SPA_HTML = r"""<!DOCTYPE html>
             <div id="top5-pvc-used"></div>
           </div>
         </div>
-        <div class="card" style="margin-bottom:14px;">
-          <div class="sec-title">Storage Pools</div>
-          <div id="storage-pools" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;"></div>
-        </div>
+        <!-- 3. PV / PVC 전체 목록 -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
           <div class="card">
             <div class="sec-title">PersistentVolumes</div>
@@ -3181,6 +3507,34 @@ SPA_HTML = r"""<!DOCTYPE html>
         <div class="card" id="uwm-panel">
           <div class="sec-title">User Workload Monitoring</div>
           <div id="uwm-content"></div>
+        </div>
+      </div>
+
+      <!-- PAGE: QUOTAS -->
+      <div id="page-quotas" class="page" style="display:none;">
+        <!-- 데이터 소스 배너 -->
+        <div id="quota-source-banner" style="display:none;margin-bottom:14px;"></div>
+        <!-- Namespace 상태 요약 -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px;"
+             id="quota-ns-kpi"></div>
+        <!-- ClusterResourceQuota 목록 -->
+        <div id="quota-list" style="display:grid;gap:14px;margin-bottom:14px;"></div>
+        <!-- Namespace 목록 (Phase 상태) -->
+        <div class="card">
+          <div class="sec-title" style="justify-content:space-between;">
+            Namespace 목록
+            <input id="ns-search" placeholder="검색..."
+              style="background:var(--bg-card2);border:1px solid var(--bd-bright);border-radius:5px;
+                     padding:4px 8px;font-size:11px;color:var(--txt-primary);outline:none;width:160px;">
+          </div>
+          <div style="overflow-x:auto;max-height:380px;overflow-y:auto;">
+            <table class="tbl">
+              <thead><tr>
+                <th>Namespace</th><th>Phase</th><th>VMs</th>
+              </tr></thead>
+              <tbody id="tbody-namespaces"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -3546,7 +3900,7 @@ let _nodeConditions = {};
 // 노드 데이터 소스 전역 변수
 let _nodeDataSource = 'cli';     // 'prometheus' | 'cli'
 let _nodeNetAvailable = false;
-const NODE_CLI_TOOLTIP = "현재 환경에서 node-exporter가 Thanos에 노출되지 않아\nCPU/MEM은 oc adm top nodes CLI로 수집됩니다.\n네트워크 RX/TX는 수집 불가합니다.";
+const NODE_CLI_TOOLTIP = "CPU/MEM: Metrics Server API 우선, 없으면 oc adm top fallback\nNet RX/TX: NetObserv eBPF 수집 중 ✅\n디스크 I/O: 수집 불가 (node-exporter Thanos 미노출)";
 const NODE_PROM_TOOLTIP = "Prometheus(Thanos)에서 실시간 수집 중입니다.";
 
 async function loadNodeConditions() {
@@ -3646,20 +4000,23 @@ async function openNodeDetail(nodeName) {
                     display:flex;align-items:flex-start;gap:8px;">
           <span style="flex-shrink:0;font-size:14px;">⚠</span>
           <div>
-            <strong>CLI 수집 모드</strong> — node-exporter가 Thanos에 노출되지 않아
-            CPU/MEM은 <code style="background:rgba(0,0,0,.3);padding:1px 4px;border-radius:3px;">oc adm top nodes</code>
-            로 30초마다 수집 후 SQLite에 저장됩니다. 네트워크/디스크 I/O는 수집 불가합니다.
+            <strong>혼합 수집 모드</strong>
+            <br>• CPU/MEM: Metrics Server API 실시간 수집 ✅
+            <br>• Net RX/TX: <strong style="color:#34d399;">NetObserv eBPF 수집 중</strong> ✅
+            <br>• 시계열: <code style="background:rgba(0,0,0,.3);padding:1px 4px;border-radius:3px;">oc adm top nodes</code> 30초 간격 SQLite 저장
+            <br>• 디스크 I/O: node-exporter Thanos 미노출로 수집 불가
           </div>
         </div>
         <!-- Current Usage -->
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:14px;">
           ${[
             ['CPU 현재', fmtPct(node.cpu_pct), node.cpu_pct, '#3b82f6'],
-            ['CPU (cores)', node.cpu_usage||'—', null, 'var(--txt-secondary)'],
+            ['CPU (cores)', node.cpu_usage ? (() => { const v=node.cpu_usage; return v.endsWith('n') ? (parseInt(v)/1e9).toFixed(2)+' cores' : v.endsWith('m') ? (parseInt(v)/1000).toFixed(2)+' cores' : v; })() : '—', null, 'var(--txt-secondary)'],
             ['MEM 현재', fmtPct(node.mem_pct), node.mem_pct, '#a78bfa'],
-            ['MEM (bytes)', node.mem_usage||'—', null, 'var(--txt-secondary)'],
-            ['Network', 'N/A', null, 'var(--txt-muted)'],
-            ['Disk I/O', 'N/A', null, 'var(--txt-muted)'],
+            ['MEM', node.mem_usage ? (() => { const v=node.mem_usage; const n=parseInt(v); return v.endsWith('Ki') ? fmtBytes(n*1024) : v.endsWith('Mi') ? fmtBytes(n*1048576) : v.endsWith('Gi') ? fmtBytes(n*1073741824) : v; })() : '—', null, 'var(--txt-secondary)'],
+            ['Net RX', node.net_rx_bps != null ? fmtBps(node.net_rx_bps) : '수집 중...', null, node.net_rx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
+            ['Net TX', node.net_tx_bps != null ? fmtBps(node.net_tx_bps) : '수집 중...', null, node.net_tx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
+            ['Disk I/O', '미지원', null, 'var(--txt-muted)'],
           ].map(([lbl,val,pct,color]) => `
             <div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:10px;text-align:center;">
               <div style="font-size:9px;color:var(--txt-muted);text-transform:uppercase;margin-bottom:5px;">${lbl}</div>
@@ -3706,8 +4063,30 @@ async function openNodeDetail(nodeName) {
           [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0, yMax:100});
         mkChart('nd-sqlite-mem', lbl,
           [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
+        // Network RX/TX 차트 (NetObserv SQLite)
+        const hasNet = (d.net_rx||[]).some(v => v != null && v > 0);
+        const ndNetWrap = document.getElementById('nd-net-wrap');
+        const ndNetUnavail = document.getElementById('nd-net-unavail');
+        const ndNetCanvas = document.getElementById('nd-sqlite-net');
+        if (ndNetWrap) {
+          if (state.charts['nd-sqlite-net']) {
+            state.charts['nd-sqlite-net'].destroy();
+            delete state.charts['nd-sqlite-net'];
+          }
+          if (hasNet) {
+            if (ndNetCanvas) ndNetCanvas.style.display = '';
+            if (ndNetUnavail) ndNetUnavail.style.display = 'none';
+            mkChart('nd-sqlite-net', lbl, [
+              sparkDataset('RX', d.net_rx||[], '#06b6d4'),
+              sparkDataset('TX', d.net_tx||[], '#34d399'),
+            ], {legend:true});
+          } else {
+            if (ndNetCanvas) ndNetCanvas.style.display = 'none';
+            if (ndNetUnavail) ndNetUnavail.style.display = '';
+          }
+        }
         if (loadingEl) loadingEl.textContent =
-          `${d.point_count}개 데이터 포인트 (30s 간격, SQLite)`;
+          `${d.point_count}개 데이터 포인트 (30s 간격, SQLite${hasNet?" + NetObserv Net":""})\`;
       } else {
         if (loadingEl) loadingEl.textContent =
           `데이터 부족 (${lbl.length}개) — 최소 2개 폴링 사이클 후 표시됩니다.`;
@@ -3924,6 +4303,20 @@ document.getElementById('vm-status-filter').addEventListener('change', filterVMs
 // ═══════════════════════════════════════════════
 function renderStorage(st) {
   const vmMap = st.pvc_vm_map || {};
+  // fuzzy VM 매핑: pvc 이름에 vm 이름이 포함된 경우 추론
+  const vmNames = (st.vms || []).map(v => ({name: v.name, ns: v.namespace}));
+  function findVmByPvc(ns, pvcName) {
+    const exactKey = ns + '/' + pvcName;
+    if (vmMap[exactKey]) return vmMap[exactKey];
+    // dv- prefix 제거 후 검색
+    const stripped = pvcName.replace(/^dv-/, '');
+    if (vmMap[ns + '/' + stripped]) return vmMap[ns + '/' + stripped];
+    // vm 이름이 pvc 이름에 포함되는 경우
+    const match = vmNames.find(v =>
+      v.ns === ns && (pvcName.includes(v.name) || v.name.includes(stripped.split('-')[0]))
+    );
+    return match ? match.name : '';
+  }
 
   // ── Top 5 최대 할당 PV ──────────────────────────────────────
   const pvsSorted = [...(st.pvs || [])]
@@ -3967,18 +4360,41 @@ function renderStorage(st) {
     </div>`;
   }).join('') : '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">PV 없음</div>';
 
-  // ── Top 5 실제 사용량 PVC ────────────────────────────────────
-  const pvcsSorted = [...(st.pvcs || [])]
-    .filter(p => p.used_bytes > 0)
-    .sort((a, b) => b.used_bytes - a.used_bytes)
+  // ── Top 5 PVC: 실제 사용량 or 할당 크기 기준 ─────────────────
+  const allPvcs = (st.pvcs || []).filter(p => p.capacity_bytes > 0 || p.used_bytes > 0);
+
+  // 모든 used_bytes가 동일하면 공유 스토리지 → 할당 크기 기준으로 전환
+  const usedValues = allPvcs.map(p => p.used_bytes).filter(v => v > 0);
+  const isSharedStorage = usedValues.length > 1 &&
+    usedValues.every(v => v === usedValues[0]);
+  // 공유 스토리지: requested_bytes(요청 크기) 기준, 실제 스토리지: used_bytes 기준
+  const sortKey = isSharedStorage ? 'requested_bytes' : 'used_bytes';
+  const sortLabel = isSharedStorage ? 'PVC 요청 크기 기준' : '실제 사용량 기준';
+
+  const pvcsSorted = [...allPvcs]
+    .filter(p => (p[sortKey] || p.requested_bytes || 0) > 0)
+    .sort((a, b) => (b[sortKey]||b.requested_bytes||0) - (a[sortKey]||a.requested_bytes||0))
     .slice(0, 5);
 
-  const maxPvcBytes = pvcsSorted[0]?.used_bytes || 1;
+  // 섹션 타이틀 업데이트
+  const pvcSecTitle = document.querySelector('#top5-pvc-used')?.closest('.card')?.querySelector('.sec-title');
+  if (pvcSecTitle) {
+    const badge = isSharedStorage
+      ? '<span style="font-size:9px;background:rgba(245,158,11,.2);color:#fbbf24;padding:1px 6px;border-radius:3px;margin-left:6px;">공유스토리지 · 할당 크기</span>'
+      : '<span style="font-size:9px;background:rgba(52,211,153,.2);color:#34d399;padding:1px 6px;border-radius:3px;margin-left:6px;">실제 사용량</span>';
+    if (!pvcSecTitle.querySelector('span[style*="border-radius"]')) {
+      pvcSecTitle.insertAdjacentHTML('beforeend', badge);
+    }
+  }
+
+  const maxPvcBytes = Math.max(...pvcsSorted.map(p => p[sortKey]||p.requested_bytes||0), 1);
   document.getElementById('top5-pvc-used').innerHTML = pvcsSorted.length ? pvcsSorted.map((p, i) => {
-    const pct    = Math.round(p.used_bytes / maxPvcBytes * 100);
-    const capPct = p.capacity_bytes ? Math.round(p.used_bytes / p.capacity_bytes * 100) : null;
+    const sortVal = p[sortKey] || p.requested_bytes || 0;
+    const pct     = Math.round(sortVal / maxPvcBytes * 100);
+    const capPct  = (!isSharedStorage && p.capacity_bytes && p.used_bytes)
+      ? Math.round(p.used_bytes / p.capacity_bytes * 100) : null;
     const key    = p.Namespace + '/' + p.Name;
-    const vmName = vmMap[key] || '';
+    const vmName = findVmByPvc(p.Namespace, p.Name);
     const capPctColor = capPct == null ? 'var(--txt-muted)' : capPct < 70 ? 'var(--success)' : capPct < 90 ? 'var(--warn)' : 'var(--danger)';
     return `<div style="padding:8px 0;border-bottom:1px solid var(--bd);">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
@@ -3991,14 +4407,22 @@ function renderStorage(st) {
                     title="${p.Name}">${p.Name}</span>
             </div>
             <div style="display:flex;align-items:center;gap:4px;margin-top:2px;">
-              ${vmName ? `<span class="badge badge-ok" style="font-size:9px;">VM: ${vmName}</span>` : '<span style="font-size:10px;color:var(--txt-muted);">VM 미연결</span>'}
+              ${(()=>{
+                if (vmName) return `<span class="badge badge-ok" style="font-size:9px;">VM: ${vmName}</span>`;
+                // DataVolume 패턴 (dv- prefix 또는 -rootdisk suffix) 안내
+                const isDv = p.Name.startsWith('dv-') || p.Name.endsWith('-rootdisk') || p.Name.endsWith('-disk');
+                if (isDv) return '<span style="font-size:10px;color:var(--accent2);">DataVolume (정지된 VM)</span>';
+                return '<span style="font-size:10px;color:var(--txt-muted);">VM 미연결</span>';
+              })()}
               ${capPct != null ? `<span style="font-size:10px;color:${capPctColor};font-weight:700;">용량의 ${capPct}%</span>` : ''}
             </div>
           </div>
         </div>
         <div style="text-align:right;flex-shrink:0;margin-left:6px;">
-          <div style="font-size:12px;font-weight:700;color:#34d399;">${fmtBytes(p.used_bytes)}</div>
-          ${p.capacity_bytes ? `<div style="font-size:10px;color:var(--txt-muted);">/ ${fmtBytes(p.capacity_bytes)}</div>` : ''}
+          <div style="font-size:12px;font-weight:700;color:#34d399;">${fmtBytes(sortVal)}</div>
+          ${isSharedStorage
+            ? `<div style="font-size:10px;color:var(--txt-muted);">요청 크기</div>`
+            : (p.capacity_bytes ? `<div style="font-size:10px;color:var(--txt-muted);">/ ${fmtBytes(p.capacity_bytes)}</div>` : '')}
         </div>
       </div>
       <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%"></div></div>
@@ -4468,6 +4892,90 @@ async function renderUWM() {
 document.getElementById('slo-hours')?.addEventListener('change', fetchRoutes);
 
 // ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// QUOTAS PAGE
+// ═══════════════════════════════════════════════
+let _quotasData = null;
+
+async function fetchQuotas() {
+  try {
+    const d = await fetch('/api/v1/quotas').then(r => r.json());
+    _quotasData = d;
+    renderQuotas(d);
+  } catch(e) { console.error('quotas fetch', e); }
+}
+
+function renderQuotas(d) {
+  const quotas = d.quotas || [];
+  const namespaces = d.namespaces || [];
+  const nsVmCount = d.ns_vm_count || {};
+  const source = d.source || 'none';
+
+  // 데이터 소스 배너
+  const banner = document.getElementById('quota-source-banner');
+  if (banner) {
+    banner.style.display = '';
+    if (quotas.length === 0) {
+      banner.innerHTML = '<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px 14px;font-size:11px;color:#fbbf24;">⚠ ClusterResourceQuota 없음 — oc get clusterresourcequota 로 확인하세요.</div>';
+    } else {
+      const srcColor = source === 'thanos' ? 'var(--success)' : 'var(--accent)';
+      const srcLabel = source === 'thanos' ? 'Thanos PromQL' : 'oc CLI (openshift-state-metrics 미설치)';
+      banner.innerHTML = '<div style="background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.2);border-radius:8px;padding:8px 14px;font-size:11px;color:var(--txt-secondary);">데이터 소스: <strong style="color:' + srcColor + ';">' + srcLabel + '</strong></div>';
+    }
+  }
+
+  // Namespace KPI
+  const active = namespaces.filter(n => n.active).length;
+  const inactive = namespaces.length - active;
+  const nsWithVm = Object.keys(nsVmCount).length;
+  document.getElementById('quota-ns-kpi').innerHTML = [
+    { label:'Total NS', value: namespaces.length, color:'var(--txt-primary)' },
+    { label:'Active',   value: active,             color:'var(--success)' },
+    { label:'Inactive', value: inactive,           color: inactive > 0 ? 'var(--warn)' : 'var(--txt-muted)' },
+    { label:'NS w/VMs', value: nsWithVm,           color:'var(--accent2)' },
+    { label:'CRQ Count',value: quotas.length,      color:'var(--accent)' },
+  ].map(k => '<div class="kpi"><div class="label">' + k.label + '</div><div class="value" style="color:' + k.color + ';font-size:20px;">' + k.value + '</div></div>').join('');
+
+  // CRQ 카드
+  const qEl = document.getElementById('quota-list');
+  if (!qEl) return;
+  if (!quotas.length) {
+    qEl.innerHTML = '<div class="card" style="text-align:center;padding:24px;color:var(--txt-muted);">ClusterResourceQuota 없음</div>';
+  } else {
+    const sorted = [...quotas].sort((a,b) => {
+      const aP = a.hard_cpu ? (a.used_cpu||0)/a.hard_cpu : 0;
+      const bP = b.hard_cpu ? (b.used_cpu||0)/b.hard_cpu : 0;
+      return bP - aP;
+    });
+    const mkBar = (pct, label, usedStr, hardStr) => {
+      if (pct === null || pct === undefined) return '';
+      const c = pct < 70 ? 'var(--success)' : pct < 90 ? 'var(--warn)' : 'var(--danger)';
+      return '<div style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;"><span style="color:var(--txt-muted);">' + label + '</span><span style="color:' + c + ';font-weight:700;">' + usedStr + ' / ' + hardStr + ' (' + pct + '%)</span></div><div class="pbar"><div class="pbar-fill" style="background:' + c + ';width:' + Math.min(pct,100) + '%"></div></div></div>';
+    };
+    qEl.innerHTML = sorted.map(q => {
+      const cpuPct = q.hard_cpu  ? Math.round((q.used_cpu||0)/q.hard_cpu*100)   : null;
+      const memPct = q.hard_mem  ? Math.round((q.used_mem||0)/q.hard_mem*100)   : null;
+      const podPct = q.hard_pods ? Math.round((q.used_pods||0)/q.hard_pods*100) : null;
+      const pvcPct = q.hard_pvc  ? Math.round((q.used_pvc||0)/q.hard_pvc*100)   : null;
+      const alertC = (cpuPct >= 90 || memPct >= 90) ? 'var(--danger)' : (cpuPct >= 70 || memPct >= 70) ? 'var(--warn)' : 'var(--success)';
+      const nsList = (q.namespaces || []).slice(0,5).join(', ') + (q.namespaces?.length > 5 ? ' ...' : '');
+      const badgeCls = cpuPct >= 90 ? 'badge-err' : cpuPct >= 70 ? 'badge-warn' : 'badge-ok';
+      return '<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;"><div style="width:10px;height:10px;border-radius:50%;background:' + alertC + ';flex-shrink:0;"></div><span style="font-size:14px;font-weight:700;color:var(--txt-primary);">' + q.name + '</span></div>' + (cpuPct !== null ? '<span class="badge ' + badgeCls + '">CPU ' + cpuPct + '%</span>' : '') + '</div>' + (nsList ? '<div style="font-size:10px;color:var(--txt-muted);margin-bottom:10px;">네임스페이스: ' + nsList + '</div>' : '') + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"><div>' + mkBar(cpuPct,'CPU',(q.used_cpu||0).toFixed(2)+' cores',(q.hard_cpu||0).toFixed(2)+' cores') + mkBar(podPct,'Pods',String(q.used_pods||0),String(q.hard_pods||0)) + '</div><div>' + mkBar(memPct,'Memory',fmtBytes(q.used_mem||0),fmtBytes(q.hard_mem||0)) + mkBar(pvcPct,'PVC',String(q.used_pvc||0),String(q.hard_pvc||0)) + '</div></div></div>';
+    }).join('');
+  }
+
+  // Namespace 테이블
+  const nsSearch = (document.getElementById('ns-search')?.value || '').toLowerCase();
+  const filteredNs = namespaces.filter(n => !nsSearch || n.namespace.toLowerCase().includes(nsSearch))
+    .sort((a,b) => { if (a.active !== b.active) return a.active ? -1 : 1; return (nsVmCount[b.namespace]||0) - (nsVmCount[a.namespace]||0); });
+  document.getElementById('tbody-namespaces').innerHTML = filteredNs.map(n => {
+    const vmCnt = nsVmCount[n.namespace] || 0;
+    return '<tr><td class="mono" style="font-size:11px;">' + n.namespace + '</td><td><span class="badge ' + (n.active ? 'badge-ok' : 'badge-warn') + '">' + n.phase + '</span></td><td>' + (vmCnt > 0 ? '<span style="color:var(--accent2);font-weight:700;">' + vmCnt + '</span>' : '<span style="color:var(--txt-muted);">—</span>') + '</td></tr>';
+  }).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--txt-muted);padding:20px;">데이터 없음</td></tr>';
+}
+
+document.getElementById('ns-search')?.addEventListener('input', () => { if (state.currentPage === 'quotas' && _quotasData) renderQuotas(_quotasData); });
+
 // INCIDENTS PAGE
 // ═══════════════════════════════════════════════
 async function fetchIncidents() {
@@ -4531,6 +5039,7 @@ function startCountdown() {
       if (state.currentPage === 'alerts') fetchAlerts();
       if (state.currentPage === 'routes') fetchRoutes();
       if (state.currentPage === 'incidents') fetchIncidents();
+      if (state.currentPage === 'quotas') fetchQuotas();
       fetchIncidents(); // 인시던트 배너 항상 갱신
     }
   }, 1000);
