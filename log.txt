@@ -1,0 +1,120 @@
+[jjyoo@bastion:~/ocp/dashboard]$ rm -f aibox_metrics.db
+python3 aibox_monitoring_portal.py
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] SQLite DB initialized: aibox_metrics.db
+/home/jjyoo/ocp/dashboard/aibox_monitoring_portal.py:1986: DeprecationWarning:
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+  @app.on_event("startup")
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] ============================================================
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] AIBox Unified Monitoring Portal v5 시작
+2026-05-26 09:37:18 [INFO] [AIBoxPortal]   DB      : aibox_metrics.db (retention 24h)
+2026-05-26 09:37:18 [INFO] [AIBoxPortal]   Interval: 30s
+2026-05-26 09:37:18 [INFO] [AIBoxPortal]   Port    : 8000
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] ============================================================
+INFO:     Started server process [1251445]
+INFO:     Waiting for application startup.
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] Prometheus 접근 전략 탐색 중...
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] 초기 수집 시작...
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] Prometheus 접근 전략 탐색 중...
+2026-05-26 09:37:18 [INFO] [AIBoxPortal] PollingEngine 시작 (interval=30s)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-05-26 09:37:19 [WARNING] [AIBoxPortal] CMD fail: oc get route thanos-querier -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:19.400042 1251533 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:19.410936 1251
+2026-05-26 09:37:19 [WARNING] [AIBoxPortal] CMD fail: oc get route thanos-querier -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:19.406809 1251532 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:19.416966 1251
+2026-05-26 09:37:19 [WARNING] [AIBoxPortal] CMD fail: oc get route prometheus-k8s-external -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:19.693178 1251572 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:19.704045 1251
+2026-05-26 09:37:19 [WARNING] [AIBoxPortal] CMD fail: oc get route prometheus-k8s-external -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:19.705397 1251573 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:19.715118 1251
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc get route prometheus-k8s -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:19.998250 1251612 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:20.009117 1251
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] Prometheus 접근 불가: 메트릭 수집 제한됨
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc get route prometheus-k8s -n openshift-monitoring -o jsonpath={.spec.host} | E0526 09:37:20.003085 1251619 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:20.013047 1251
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] Prometheus 접근 불가: 메트릭 수집 제한됨
+2026-05-26 09:37:20 [INFO] [AIBoxPortal] --- Polling cycle #1 시작 ---
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc version -o json | error: You must be logged in to the server (Unauthorized)
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc version -o json | error: You must be logged in to the server (Unauthorized)
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc adm top nodes --no-headers | error: You must be logged in to the server (the server has asked for the client to provide credentials)
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc adm top nodes --no-headers | error: You must be logged in to the server (the server has asked for the client to provide credentials)
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc get nodes -o json | E0526 09:37:20.797757 1251729 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:20.809311 1251
+2026-05-26 09:37:20 [WARNING] [AIBoxPortal] CMD fail: oc get nodes -o json | E0526 09:37:20.819609 1251735 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:20.829913 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get vm -A -o json | E0526 09:37:21.107572 1251766 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.118640 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get vm -A -o json | E0526 09:37:21.167915 1251772 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.178875 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get sc -o json | E0526 09:37:21.450158 1251806 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.460347 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get sc -o json | E0526 09:37:21.461509 1251823 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.473968 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get pv -o json | E0526 09:37:21.741718 1251843 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.755000 1251
+2026-05-26 09:37:21 [WARNING] [AIBoxPortal] CMD fail: oc get pv -o json | E0526 09:37:21.758074 1251849 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:21.768174 1251
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get pvc -A -o json | E0526 09:37:22.032102 1251882 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.042665 1251
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get pvc -A -o json | E0526 09:37:22.055661 1251888 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.064986 1251
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get clusteroperator -o json | E0526 09:37:22.325745 1251921 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.337345 1251
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get clusteroperator -o json | E0526 09:37:22.336750 1251927 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.347778 1251
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get mcp -o json | E0526 09:37:22.608230 1251959 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.619648 1251
+2026-05-26 09:37:22 [INFO] [AIBoxPortal] 초기 수집 완료 — nodes=0 vms=0
+2026-05-26 09:37:22 [INFO] [AIBoxPortal] HTML 리포트 생성 완료: vm_metrics_report.html (9789 bytes)
+2026-05-26 09:37:22 [WARNING] [AIBoxPortal] CMD fail: oc get mcp -o json | E0526 09:37:22.636540 1251965 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:22.646205 1251
+2026-05-26 09:37:22 [INFO] [AIBoxPortal] HTML 리포트 생성 완료: vm_metrics_report.html (9789 bytes)
+2026-05-26 09:37:22 [INFO] [AIBoxPortal] --- Polling cycle #1 완료 (2637ms, success) ---
+2026-05-26 09:37:50 [INFO] [AIBoxPortal] --- Polling cycle #2 시작 ---
+2026-05-26 09:37:50 [WARNING] [AIBoxPortal] CMD fail: oc version -o json | error: You must be logged in to the server (Unauthorized)
+2026-05-26 09:37:50 [WARNING] [AIBoxPortal] CMD fail: oc adm top nodes --no-headers | error: You must be logged in to the server (the server has asked for the client to provide credentials)
+2026-05-26 09:37:50 [WARNING] [AIBoxPortal] CMD fail: oc get nodes -o json | E0526 09:37:50.849882 1252090 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:50.860638 1252
+2026-05-26 09:37:51 [WARNING] [AIBoxPortal] CMD fail: oc get vm -A -o json | E0526 09:37:51.187162 1252110 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:51.197052 1252
+2026-05-26 09:37:51 [WARNING] [AIBoxPortal] CMD fail: oc get sc -o json | E0526 09:37:51.517638 1252128 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:51.527927 1252
+2026-05-26 09:37:51 [WARNING] [AIBoxPortal] CMD fail: oc get pv -o json | E0526 09:37:51.797979 1252147 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:51.808748 1252
+2026-05-26 09:37:52 [WARNING] [AIBoxPortal] CMD fail: oc get pvc -A -o json | E0526 09:37:52.099438 1252167 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:52.109512 1252
+2026-05-26 09:37:52 [WARNING] [AIBoxPortal] CMD fail: oc get clusteroperator -o json | E0526 09:37:52.480249 1252187 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:52.490614 1252
+2026-05-26 09:37:52 [WARNING] [AIBoxPortal] CMD fail: oc get mcp -o json | E0526 09:37:52.764539 1252207 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:37:52.775751 1252
+2026-05-26 09:37:52 [INFO] [AIBoxPortal] HTML 리포트 생성 완료: vm_metrics_report.html (9789 bytes)
+2026-05-26 09:37:52 [INFO] [AIBoxPortal] --- Polling cycle #2 완료 (2740ms, success) ---
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+INFO:     127.0.0.1:50510 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50510 - "GET /api/v1/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50510 - "GET /api/v1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50514 - "GET /api/v1/nodes/conditions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50514 - "GET /api/v1/trends/cluster?hours=1 HTTP/1.1" 200 OK
+2026-05-26 09:38:20 [INFO] [AIBoxPortal] --- Polling cycle #3 시작 ---
+2026-05-26 09:38:20 [WARNING] [AIBoxPortal] CMD fail: oc version -o json | error: You must be logged in to the server (Unauthorized)
+2026-05-26 09:38:20 [WARNING] [AIBoxPortal] CMD fail: oc adm top nodes --no-headers | error: You must be logged in to the server (the server has asked for the client to provide credentials)
+2026-05-26 09:38:20 [WARNING] [AIBoxPortal] CMD fail: oc get nodes -o json | E0526 09:38:20.836805 1252486 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:20.847904 1252
+2026-05-26 09:38:21 [WARNING] [AIBoxPortal] CMD fail: oc get vm -A -o json | E0526 09:38:21.121549 1252506 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:21.132630 1252
+2026-05-26 09:38:21 [WARNING] [AIBoxPortal] CMD fail: oc get sc -o json | E0526 09:38:21.467312 1252525 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:21.477591 1252
+2026-05-26 09:38:21 [WARNING] [AIBoxPortal] CMD fail: oc get pv -o json | E0526 09:38:21.761020 1252544 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:21.771498 1252
+2026-05-26 09:38:22 [WARNING] [AIBoxPortal] CMD fail: oc get pvc -A -o json | E0526 09:38:22.040745 1252565 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:22.051245 1252
+2026-05-26 09:38:22 [WARNING] [AIBoxPortal] CMD fail: oc get clusteroperator -o json | E0526 09:38:22.319253 1252585 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:22.329679 1252
+2026-05-26 09:38:22 [WARNING] [AIBoxPortal] CMD fail: oc get mcp -o json | E0526 09:38:22.591666 1252604 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: the server has asked for the client to provide credentials"
+E0526 09:38:22.601273 1252
+2026-05-26 09:38:22 [INFO] [AIBoxPortal] HTML 리포트 생성 완료: vm_metrics_report.html (9789 bytes)
+2026-05-26 09:38:22 [INFO] [AIBoxPortal] --- Polling cycle #3 완료 (2544ms, success) ---
