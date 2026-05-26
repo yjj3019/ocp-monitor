@@ -433,7 +433,7 @@ class SQLiteManager:
                 c.execute(
                     "INSERT INTO metric_collection_log (cycle_id,metric_name,status,item_count,duration_ms,error_msg) "
                     "VALUES (?,?,?,?,?,?)",
-                    (cycle_id, r.name, r.status, r.count, r.duration_ms, r.error),
+                    (cycle_id, r.name, r.status, (int(r.count) if isinstance(r.count, int) else (len(r.count) if hasattr(r.count, "__len__") else 0)), r.duration_ms, r.error),
                 )
 
     def store_prometheus_ping(self, strategy: str, host: str, latency_ms: float, reachable: bool) -> None:
@@ -1738,6 +1738,7 @@ class MetricsCollector:
                     }
                     for p in m.pvc_data
                 ],
+                "pvc_disk_source": getattr(m, "_pvc_disk_source", "none"),
                 "pvc_vm_map": {
                     f"{vm.namespace}/{vol.get('pvc','')}": vm.name
                     for vm in m.vms
@@ -3956,7 +3957,20 @@ function renderStorage(st) {
       </div>
       <div class="pbar"><div class="pbar-fill" style="background:#34d399;width:${pct}%"></div></div>
     </div>`;
-  }).join('') : '<div style="color:var(--txt-muted);font-size:12px;text-align:center;padding:12px;">실제 사용량 데이터 없음<br><span style="font-size:10px;">kubelet_volume_stats 수집 필요</span></div>';
+  }).join('') : `<div style="text-align:center;padding:16px;">
+    <div style="color:var(--txt-muted);font-size:12px;margin-bottom:8px;">실제 사용량 데이터 없음</div>
+    <div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:7px;padding:10px;font-size:11px;color:#fbbf24;text-align:left;">
+      <div style="font-weight:700;margin-bottom:6px;">⚙ 수집 전략 (자동 시도 순서):</div>
+      <div style="color:var(--txt-secondary);line-height:1.8;">
+        1️⃣ Thanos PromQL — kubelet_volume_stats_* <br>
+        2️⃣ kubelet proxy — /api/v1/nodes/{node}/proxy/metrics<br>
+        3️⃣ oc exec — virt-launcher pod df 명령<br>
+        <br>
+        <span style="color:var(--txt-muted);">현재 소스: <strong style="color:${st.pvc_disk_source||'none'}">${st.pvc_disk_source||'none'}</strong></span><br>
+        Running 상태의 VM이 있어야 수집 가능합니다.
+      </div>
+    </div>
+  </div>`;
 
   // ── Storage Pools ────────────────────────────────────────────
   document.getElementById('storage-pools').innerHTML = st.pools.map(p => {
