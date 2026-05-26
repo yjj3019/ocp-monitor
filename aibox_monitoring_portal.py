@@ -3677,6 +3677,8 @@ const fmtBytes = b => {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(1)} ${units[i]}`;
 };
+const fmtCpuRaw = s => { if(!s||s==="N/A") return s; if(s.endsWith("n")) return (parseInt(s)/1e9).toFixed(2)+" cores"; if(s.endsWith("m")) return (parseInt(s)/1000).toFixed(2)+" cores"; return parseFloat(s).toFixed(2)+" cores"; };
+const fmtMemRaw = s => { if(!s||s==="N/A") return s; if(s.endsWith("Ki")) return fmtBytes(parseInt(s)*1024); if(s.endsWith("Mi")) return fmtBytes(parseInt(s)*1048576); if(s.endsWith("Gi")) return fmtBytes(parseInt(s)*1073741824); return s; };
 const fmtBps = b => {
   if (b == null) return '—';
   const units = ['B/s','KB/s','MB/s','GB/s'];
@@ -4064,29 +4066,23 @@ async function openNodeDetail(nodeName) {
         mkChart('nd-sqlite-mem', lbl,
           [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
         // Network RX/TX 차트 (NetObserv SQLite)
-        const hasNet = (d.net_rx||[]).some(v => v != null && v > 0);
-        const ndNetWrap = document.getElementById('nd-net-wrap');
-        const ndNetUnavail = document.getElementById('nd-net-unavail');
-        const ndNetCanvas = document.getElementById('nd-sqlite-net');
-        if (ndNetWrap) {
-          if (state.charts['nd-sqlite-net']) {
-            state.charts['nd-sqlite-net'].destroy();
-            delete state.charts['nd-sqlite-net'];
-          }
-          if (hasNet) {
-            if (ndNetCanvas) ndNetCanvas.style.display = '';
-            if (ndNetUnavail) ndNetUnavail.style.display = 'none';
-            mkChart('nd-sqlite-net', lbl, [
-              sparkDataset('RX', d.net_rx||[], '#06b6d4'),
-              sparkDataset('TX', d.net_tx||[], '#34d399'),
-            ], {legend:true});
-          } else {
-            if (ndNetCanvas) ndNetCanvas.style.display = 'none';
-            if (ndNetUnavail) ndNetUnavail.style.display = '';
-          }
+        // Network 차트 (NetObserv)
+        const _netRx = (d.net_rx||[]).map(v => v==null ? 0 : v);
+        const _netTx = (d.net_tx||[]).map(v => v==null ? 0 : v);
+        const _hasNet = _netRx.some(v => v > 0);
+        if (state.charts["nd-sqlite-net"]) {
+          state.charts["nd-sqlite-net"].destroy();
+          delete state.charts["nd-sqlite-net"];
+        }
+        if (_hasNet) {
+          mkChart("nd-sqlite-net", lbl, [
+            sparkDataset("RX", _netRx, "#06b6d4"),
+            sparkDataset("TX", _netTx, "#34d399"),
+          ], {legend:true});
+        }
         }
         if (loadingEl) loadingEl.textContent =
-          `${d.point_count}개 데이터 포인트 (30s 간격, SQLite${hasNet?" + NetObserv Net":""})\`;
+          `${d.point_count}개 데이터 포인트 (30s 간격, SQLite${hasNet?" + NetObserv Net":""})`;;
       } else {
         if (loadingEl) loadingEl.textContent =
           `데이터 부족 (${lbl.length}개) — 최소 2개 폴링 사이클 후 표시됩니다.`;
@@ -4136,9 +4132,9 @@ function renderNodes(nodes) {
       <td><span class="badge badge-off">${n.roles}</span></td>
       <td><span class="dot ${n.status==='Ready'?'dot-ok':'dot-err'}"></span> ${n.status}</td>
       <td>${n.age}</td>
-      <td class="mono">${n.cpu_usage}</td>
+      <td class="mono" style="font-size:11px;">${fmtCpuRaw(n.cpu_usage)}</td>
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${cpc}" style="width:${n.cpu_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.cpu_pct)}</span></div></td>
-      <td class="mono">${n.mem_usage}</td>
+      <td class="mono" style="font-size:11px;">${fmtMemRaw(n.mem_usage)}</td>
       <td><div class="pbar-wrap"><div class="pbar"><div class="pbar-fill ${mpc}" style="width:${n.mem_pct||0}%"></div></div><span style="font-size:10px;color:var(--txt-secondary);width:36px">${fmtPct(n.mem_pct)}</span></div></td>
       <td class="mono" style="font-size:10px;color:var(--txt-secondary);"
           title="${n.net_rx_bps==null?(_nodeNetAvailable?'수집 중':'환경 제약: node-exporter 미노출'):''}"
