@@ -1,0 +1,3298 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cluster-monitoring-dashboard
+  namespace: openshift-operators
+spec:
+  allowCrossNamespaceImport: false
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana-dashboards
+  json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": {
+              "type": "grafana",
+              "uid": "-- Grafana --"
+            },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 38,
+          "panels": [],
+          "title": "🏡 클러스터 개요",
+          "type": "row"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "id": 39,
+          "options": {
+            "code": {
+              "language": "plaintext",
+              "showLineNumbers": false,
+              "showMiniMap": false
+            },
+            "content": "- **버전:** ${ocp_version} \n- **총 노드 수:** ${total_nodes}  \n- **Ready 노드:** ${ready_nodes}\n---\n**마지막 업데이트:** ${__to:date:YYYY-MM-DD HH:mm:ss}",
+            "mode": "markdown"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "title": "📊 OCP 클러스터 정보",
+          "type": "text"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "min(up{apiserver=\"kube-apiserver\"}) by () "
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "options": {
+                          "0": {
+                            "color": "semi-dark-red",
+                            "index": 1,
+                            "text": "Unhealthy"
+                          },
+                          "1": {
+                            "color": "semi-dark-green",
+                            "index": 0,
+                            "text": "Healthy"
+                          }
+                        },
+                        "type": "value"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "API 서버 상태"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "min(up{job=\"etcd\"}) by () "
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "options": {
+                          "0": {
+                            "color": "semi-dark-red",
+                            "index": 1,
+                            "text": "Unhealthy"
+                          },
+                          "1": {
+                            "color": "semi-dark-green",
+                            "index": 0,
+                            "text": "Healthy"
+                          }
+                        },
+                        "type": "value"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "ETCD 서버 상태"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "min(up{job=\"dns-default\"}) by () "
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "options": {
+                          "0": {
+                            "color": "semi-dark-red",
+                            "index": 1,
+                            "text": "Unhealthy"
+                          },
+                          "1": {
+                            "color": "semi-dark-green",
+                            "index": 0,
+                            "text": "Healthy"
+                          }
+                        },
+                        "type": "value"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "CoreDNS 서버 상태"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "id": 40,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "min(up{apiserver=\"kube-apiserver\"}) by () ",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "min(up{job=\"etcd\"}) by () ",
+              "instant": false,
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "min(up{job=\"dns-default\"}) by () ",
+              "instant": false,
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "OCP 컴포넌트 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 12,
+            "y": 1
+          },
+          "id": 14,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker01.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker01 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 14,
+            "y": 1
+          },
+          "id": 13,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker02.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker02 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 16,
+            "y": 1
+          },
+          "id": 15,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker03.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker03 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 18,
+            "y": 1
+          },
+          "id": 16,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker04.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker04 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 20,
+            "y": 1
+          },
+          "id": 17,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker05.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker05 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 22,
+            "y": 1
+          },
+          "id": 20,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker06.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker06 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 0,
+            "y": 6
+          },
+          "id": 25,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"master01.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Master01 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 2,
+            "y": 6
+          },
+          "id": 26,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"master02.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Master02 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 4,
+            "y": 6
+          },
+          "id": 27,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"master03.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Master03 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 3
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "{__name__=\"kube_node_status_condition\", condition=\"Ready\", container=\"kube-rbac-proxy-main\", endpoint=\"https-main\", job=\"kube-state-metrics\", namespace=\"openshift-monitoring\", node=\"master01.cloud.tmax\", prometheus=\"openshift-monitoring/k8s\", service=\"kube-state-metrics\", status=\"true\"}"
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 6,
+            "y": 6
+          },
+          "id": 12,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=~\"master.*\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "◀ Masters Ready",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 3
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "{__name__=\"kube_node_status_condition\", condition=\"Ready\", container=\"kube-rbac-proxy-main\", endpoint=\"https-main\", job=\"kube-state-metrics\", namespace=\"openshift-monitoring\", node=\"master01.cloud.tmax\", prometheus=\"openshift-monitoring/k8s\", service=\"kube-state-metrics\", status=\"true\"}"
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 8,
+            "y": 6
+          },
+          "id": 11,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "count(kube_node_info{node=~\".*\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "전체 노드 수",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 12
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "{__name__=\"kube_node_status_condition\", condition=\"Ready\", container=\"kube-rbac-proxy-main\", endpoint=\"https-main\", job=\"kube-state-metrics\", namespace=\"openshift-monitoring\", node=\"master01.cloud.tmax\", prometheus=\"openshift-monitoring/k8s\", service=\"kube-state-metrics\", status=\"true\"}"
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 10,
+            "y": 6
+          },
+          "id": 7,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=~\"worker.*\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Workers Ready ▶",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "1": {
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 12,
+            "y": 6
+          },
+          "id": 19,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker07.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker07 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 14,
+            "y": 6
+          },
+          "id": 21,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker08.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker08 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 16,
+            "y": 6
+          },
+          "id": 22,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker09.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker09 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 18,
+            "y": 6
+          },
+          "id": 18,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker10.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker10 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 20,
+            "y": 6
+          },
+          "id": 23,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker11.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker11 상태",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "비정상"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "정상"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "semi-dark-red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 2,
+            "x": 22,
+            "y": 6
+          },
+          "id": 24,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\", node=\"worker12.cloud.tmax\", prometheus_replica=\"$fixed_prometheus_replica\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Worker12 상태",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 11
+          },
+          "id": 37,
+          "panels": [],
+          "title": "📈 리소스 사용률 현황",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "100 - (avg(irate(node_cpu_seconds_total{mode=\"idle\", prometheus_replica=\"$fixed_prometheus_replica\"}[5m])) * 100)"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "클러스터 Memory 사용률"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 3,
+            "x": 0,
+            "y": 12
+          },
+          "id": 33,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 - (avg(irate(node_cpu_seconds_total{mode=\"idle\", prometheus_replica=\"$fixed_prometheus_replica\"}[5m])) * 100)",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "클러스터 전체 CPU 통합 사용률",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "fieldMinMax": false,
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 3,
+            "y": 12
+          },
+          "id": 5,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "d75dbf74-ed3c-4b9d-b09e-24d286e6b998"
+              },
+              "editorMode": "code",
+              "expr": "sum(max(kube_pod_container_resource_requests{resource=\"cpu\",node=~\"master(0[1-3])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) by (namespace, pod, node)* on (namespace,pod) group_left() (max(kube_pod_status_phase{phase=\"Running\",prometheus_replica=\"$fixed_prometheus_replica\"}) by (pod, namespace) == 1)) by (node)  ",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "[Master] CPU 사용률",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax",
+                "renamePattern": "$1"
+              }
+            }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "fieldMinMax": false,
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": ""
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 9,
+            "y": 12
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "d75dbf74-ed3c-4b9d-b09e-24d286e6b998"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "sum(max(kube_pod_container_resource_requests{resource=\"cpu\",node=~\"worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) by (namespace, pod, node)* on (namespace,pod) group_left() (max(kube_pod_status_phase{phase=\"Running\",prometheus_replica=\"$fixed_prometheus_replica\"}) by (pod, namespace) == 1)) by (node)  ",
+              "format": "time_series",
+              "instant": false,
+              "legendFormat": "{{node}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "[Worker] CPU 사용률",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax",
+                "renamePattern": "$1"
+              }
+            }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 3,
+            "x": 15,
+            "y": 12
+          },
+          "id": 29,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "(powerstore_cap_last_physical_used{IP=\"172.21.10.51\"} / powerstore_cap_last_physical_total{IP=\"172.21.10.51\"}) * 100",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "iSCSI Physical 사용률",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 116545560119296,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "powerstore_cap_last_physical_used"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "물리적 사용량"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "powerstore_cap_last_physical_total"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "물리적 전체 용량"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 18,
+            "y": 12
+          },
+          "id": 31,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "powerstore_cap_last_physical_used{IP=\"172.21.10.51\"}",
+              "legendFormat": "{{__name__}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "powerstore_cap_last_physical_total{IP=\"172.21.10.51\"}",
+              "instant": false,
+              "legendFormat": "{{__name__}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "iSCSI Physical 사용률",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "100 * (1 - ((sum(node_memory_MemFree_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Cached_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Buffers_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})) / sum(node_memory_MemTotal_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "클러스터 Memory 사용률"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 3,
+            "x": 0,
+            "y": 18
+          },
+          "id": 34,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 * (1 - ((sum(node_memory_MemFree_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Cached_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Buffers_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})) / sum(node_memory_MemTotal_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "클러스터 전체 Memory 통합 사용률",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "100 * (1 - ((sum(node_memory_MemFree_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Cached_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Buffers_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})) / sum(node_memory_MemTotal_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "클러스터 Memory 사용률"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 3,
+            "y": 18
+          },
+          "id": 41,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 * (1 - (  \r\n  sum by (instance) (node_memory_MemFree_bytes{instance=~\"master0[1-3]\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) +  \r\n  sum by (instance) (node_memory_Cached_bytes{instance=~\"master0[1-3]\\\\.cloud\\\\.tmax\"}) +  \r\n  sum by (instance) (node_memory_Buffers_bytes{instance=~\"master0[1-3]\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"})  \r\n) /  \r\n(  \r\n  sum by (instance) (node_memory_MemTotal_bytes{instance=~\"master0[1-3]\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"})  \r\n))  ",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "[Master] 메모리 사용률",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax",
+                "renamePattern": "$1"
+              }
+            }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "100 * (1 - ((sum(node_memory_MemFree_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Cached_bytes{prometheus_replica=\"$fixed_prometheus_replica\"}) + sum(node_memory_Buffers_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})) / sum(node_memory_MemTotal_bytes{prometheus_replica=\"$fixed_prometheus_replica\"})))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "클러스터 Memory 사용률"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 9,
+            "y": 18
+          },
+          "id": 42,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 * (1 - ( \r\n  sum by (instance) (node_memory_MemFree_bytes{instance=~\"worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) + \r\n  sum by (instance) (node_memory_Cached_bytes{instance=~\"worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) + \r\n  sum by (instance) (node_memory_Buffers_bytes{instance=~\"worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) \r\n) / \r\n( \r\n  sum by (instance) (node_memory_MemTotal_bytes{instance=~\"worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}) \r\n))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "[Worker] 메모리 사용률",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax",
+                "renamePattern": "$1"
+              }
+            }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 80
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 95
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 3,
+            "x": 15,
+            "y": 18
+          },
+          "id": 30,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "(powerstore_cap_last_logical_used{IP=\"172.21.10.51\"} / powerstore_cap_last_logical_provisioned{IP=\"172.21.10.51\"}) * 100",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "iSCSI Logical 사용률",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "powerstore_cap_last_logical_used"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "논리적 사용량"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "powerstore_cap_last_logical_provisioned"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "논리적 전체 용량"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 18,
+            "y": 18
+          },
+          "id": 32,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "powerstore_cap_last_logical_used{IP=\"172.21.10.51\"}",
+              "legendFormat": "{{__name__}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "powerstore_cap_last_logical_provisioned{IP=\"172.21.10.51\"}",
+              "instant": false,
+              "legendFormat": "{{__name__}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "iSCSI Logical 사용률",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 24
+          },
+          "id": 36,
+          "panels": [],
+          "title": "🚀 I/O 성능 현황",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 50000000
+                  },
+                  {
+                    "color": "red",
+                    "value": 100000000
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_disk_read_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"prometheus-k8s-0\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "디스크 Read"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_disk_written_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"prometheus-k8s-0\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "디스크 Write"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 25
+          },
+          "id": 43,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(node_disk_read_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(node_disk_written_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "instant": false,
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "클러스터 전체 디스크 I/O",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": ""
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 4,
+            "y": 25
+          },
+          "id": 44,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum by (instance) (rate(node_disk_read_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "legendFormat": "{{instance}} | Read",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "- sum by (instance) (rate(node_disk_written_bytes_total{instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "instant": false,
+              "legendFormat": "{{instance}} | Write",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "각 노드별 디스크 I/O",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax |",
+                "renamePattern": "$1 "
+              }
+            }
+          ],
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 1000000000
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 1125000000
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 1187500000
+                  }
+                ]
+              },
+              "unit": "binBps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_network_receive_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"prometheus-k8s-0\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "수신 I/O"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_network_transmit_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"prometheus-k8s-0\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "송신 I/O"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 12,
+            "y": 25
+          },
+          "id": 48,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(node_network_receive_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(node_network_transmit_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))",
+              "instant": false,
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "클러스터 네트워크 I/O",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 1000000000
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 1125000000
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 1187500000
+                  }
+                ]
+              },
+              "unit": "binBps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_network_receive_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "수신 I/O"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "sum(rate(node_network_transmit_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "송신 I/O"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 16,
+            "y": 25
+          },
+          "id": 49,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum by (instance) (rate(node_network_receive_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))  ",
+              "legendFormat": "{{instance}} | Receive",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "-sum by (instance) (rate(node_network_transmit_bytes_total{device=~\"^(eth|en|bond).*\",instance=~\"master0[1-3]|worker(0[1-9]|1[0-2])\\\\.cloud\\\\.tmax\",prometheus_replica=\"$fixed_prometheus_replica\"}[5m]))  ",
+              "instant": false,
+              "legendFormat": "{{instance}} | Transmit",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "클러스터 네트워크 I/O",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "(.+?)\\.cloud\\.tmax |",
+                "renamePattern": "$1 "
+              }
+            }
+          ],
+          "type": "timeseries"
+        }
+      ],
+      "preload": false,
+      "refresh": "30s",
+      "schemaVersion": 42,
+      "tags": [
+        "cluster",
+        "overview"
+      ],
+      "templating": {
+        "list": [
+          {
+            "current": {
+              "text": "4.20.10",
+              "value": "4.20.10"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "label_values(cluster_version{version=\"4.20.10\"},version)",
+            "name": "ocp_version",
+            "options": [],
+            "query": {
+              "qryType": 1,
+              "query": "label_values(cluster_version{version=\"4.20.10\"},version)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "allowCustomValue": true,
+            "current": {
+              "text": "15",
+              "value": "15"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(sum(kube_node_info{prometheus_replica=\"$fixed_prometheus_replica\"}) by ())",
+            "name": "total_nodes",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(sum(kube_node_info{prometheus_replica=\"$fixed_prometheus_replica\"}) by ())",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "15",
+              "value": "15"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kube_node_status_condition{condition=\"Ready\", status=\"true\", prometheus_replica=\"$fixed_prometheus_replica\"}))",
+            "name": "ready_nodes",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kube_node_status_condition{condition=\"Ready\", status=\"true\", prometheus_replica=\"$fixed_prometheus_replica\"}))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "prometheus-k8s-0",
+              "value": "prometheus-k8s-0"
+            },
+            "description": "Prometheus replica fixed to prometheus-k8s-0",
+            "includeAll": false,
+            "name": "fixed_prometheus_replica",
+            "options": [],
+            "query": "prometheus-k8s-0",
+            "type": "custom",
+            "valuesFormat": "csv"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "[Sample] OCP 클러스터 리소스 모니터링",
+      "uid": "roqt2hf",
+      "version": 1,
+      "weekStart": ""
+    }
