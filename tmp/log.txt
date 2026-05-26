@@ -1,1 +1,173 @@
-1
+[jjyoo@bastion:~]$ # FlowCollector 상태 확인
+oc get flowcollector cluster -o yaml | grep -A20 "status:"
+
+# eBPF 에이전트가 왜 안 뜨는지 확인
+oc get events -n netobserv --sort-by='.lastTimestamp' | tail -15
+
+# FlowCollector 재생성 (eBPF privileged 활성화)
+oc delete flowcollector cluster
+
+cat << 'EOF' | oc apply -f -
+apiVersion: flows.netobserv.io/v1beta2
+kind: FlowCollector
+metadata:
+  name: cluster
+spec:
+  namespace: netobserv
+  deploymentModel: Direct
+  agent:
+    type: eBPF
+    ebpf:
+      sampling: 50
+      privileged: true
+      interfaces: []
+      excludeInterfaces:
+      - lo
+      resources:
+        requests:
+          memory: 50Mi
+          cpu: 100m
+        limits:
+          memory: 800Mi
+  processor:
+    resources:
+      requests:
+        memory: 100Mi
+        cpu: 100m
+      limits:
+        memory: 800Mi
+  loki:
+    enable: false
+  consolePlugin:
+    enable: false
+EOF
+
+# 재생성 후 에이전트 확인
+sleep 30 && oc get pods -n netobserv && oc get daemonset -n netobserv
+      status: Disabled
+    enable: false
+    imagePullPolicy: IfNotPresent
+    logLevel: info
+    portNaming:
+      enable: true
+    quickFilters:
+    - default: true
+      filter:
+        flow_layer: '"app"'
+      name: Applications
+    - filter:
+        flow_layer: '"infra"'
+      name: Infrastructure
+    - default: true
+      filter:
+        dst_kind: '"Pod"'
+        src_kind: '"Pod"'
+      name: Pods network
+    - filter:
+        dst_kind: '"Service"'
+--
+      status: Disabled
+    kafkaConsumerBatchSize: 10485760
+    kafkaConsumerQueueCapacity: 1000
+    kafkaConsumerReplicas: 3
+    logLevel: info
+    logTypes: Flows
+    metrics:
+      server:
+        tls:
+          insecureSkipVerify: false
+          type: Disabled
+    multiClusterDeployment: false
+    resources:
+      limits:
+        memory: 800Mi
+      requests:
+        cpu: 100m
+        memory: 100Mi
+    subnetLabels: {}
+  prometheus:
+    querier:
+--
+status:
+  conditions:
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: 6 ready components, 0 with failure, 0 pending
+    reason: Ready
+    status: "True"
+    type: Ready
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingNetworkPolicy
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingMonitoring
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingFlowCollectorLegacy
+  - lastTransitionTime: "2026-05-26T05:50:55Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingFLPParent
+  - lastTransitionTime: "2026-05-26T05:44:37Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingStaticController
+  - lastTransitionTime: "2026-05-26T05:44:37Z"
+    message: ""
+    reason: Valid
+    status: "False"
+    type: ConfigurationIssue
+  - lastTransitionTime: "2026-05-26T05:44:37Z"
+    message: Loki is disabled
+    reason: Unused
+    status: Unknown
+    type: LokiIssue
+  - lastTransitionTime: "2026-05-26T05:44:37Z"
+    message: ""
+    reason: Unused
+    status: Unknown
+    type: LokiWarning
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: ""
+    reason: Ready
+    status: "False"
+    type: WaitingFLPMonolith
+  - lastTransitionTime: "2026-05-26T05:44:38Z"
+    message: Transformer only used with Kafka
+    reason: ComponentUnused
+    status: Unknown
+    type: WaitingFLPTransformer
+9m39s       Normal    Pulled             pod/flowlogs-pipeline-c4bf5   Successfully pulled image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa" in 45.617s (45.617s including waiting). Image size: 205237934 bytes.
+9m39s       Normal    Started            pod/flowlogs-pipeline-c4bf5   Started container flowlogs-pipeline
+9m37s       Normal    AddedInterface     pod/flowlogs-pipeline-rfd4q   Add eth0 [10.128.1.56/23] from ovn-kubernetes
+9m36s       Normal    Pulling            pod/flowlogs-pipeline-rfd4q   Pulling image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa"
+9m2s        Normal    Pulled             pod/flowlogs-pipeline-rqsk6   Successfully pulled image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa" in 45.624s (45.624s including waiting). Image size: 205237934 bytes.
+9m2s        Normal    Created            pod/flowlogs-pipeline-rqsk6   Created container flowlogs-pipeline
+9m2s        Normal    Started            pod/flowlogs-pipeline-rqsk6   Started container flowlogs-pipeline
+8m51s       Normal    Started            pod/flowlogs-pipeline-rfd4q   Started container flowlogs-pipeline
+8m51s       Normal    Pulled             pod/flowlogs-pipeline-rfd4q   Successfully pulled image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa" in 45.591s (45.591s including waiting). Image size: 205237934 bytes.
+8m51s       Normal    Created            pod/flowlogs-pipeline-rfd4q   Created container flowlogs-pipeline
+8m14s       Normal    Pulling            pod/flowlogs-pipeline-2njwf   Pulling image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa"
+8m14s       Normal    AddedInterface     pod/flowlogs-pipeline-2njwf   Add eth0 [10.129.1.118/23] from ovn-kubernetes
+7m28s       Normal    Started            pod/flowlogs-pipeline-2njwf   Started container flowlogs-pipeline
+7m28s       Normal    Created            pod/flowlogs-pipeline-2njwf   Created container flowlogs-pipeline
+7m28s       Normal    Pulled             pod/flowlogs-pipeline-2njwf   Successfully pulled image "registry.redhat.io/network-observability/network-observability-flowlogs-pipeline-rhel9@sha256:e25485a05a07d28e6ef9ec792dbbbbb8ccea14d90af3f20170fd69541792fdfa" in 45.374s (45.374s including waiting). Image size: 205237934 bytes.
+flowcollector.flows.netobserv.io "cluster" deleted
+flowcollector.flows.netobserv.io/cluster created
+NAME                      READY   STATUS    RESTARTS   AGE
+flowlogs-pipeline-28vss   1/1     Running   0          113s
+flowlogs-pipeline-84btc   1/1     Running   0          113s
+flowlogs-pipeline-ghttv   1/1     Running   0          113s
+flowlogs-pipeline-hd96s   1/1     Running   0          113s
+flowlogs-pipeline-sw647   1/1     Running   0          113s
+flowlogs-pipeline-v55vl   1/1     Running   0          113s
+NAME                DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+flowlogs-pipeline   6         6         6       6            6           <none>          30s
