@@ -1,0 +1,2056 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: virtualmachine-monitoring-dashboard
+  namespace: openshift-operators
+spec:
+  allowCrossNamespaceImport: false
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana-dashboards
+  json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": {
+              "type": "grafana",
+              "uid": "-- Grafana --"
+            },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 31,
+          "panels": [],
+          "title": "🖥️ VM 목록",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "description": "Running 상태의 VM 현황입니다",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "color-text"
+                },
+                "footer": {
+                  "reducers": []
+                },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": 0
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "vm_namespace"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "VM 네임스페이스"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "name"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "VM 이름"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "guest_os_version_id"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "OS 버전"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #A"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "CPU 할당량 (cores)"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #B"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "메모리 할당량"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #D"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "root 디스크 할당량"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #E"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "data 디스크 할당량"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "phase"
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "options": {
+                          "running": {
+                            "color": "semi-dark-green",
+                            "index": 0,
+                            "text": "Running"
+                          }
+                        },
+                        "type": "value"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "상태"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "node"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "노드"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "guest_os_name"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "OS 제품명"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "OS 제품명"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 257
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "OS 버전"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 99
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "상태"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 89
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 1
+          },
+          "id": 23,
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true,
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "root 디스크 할당량"
+              }
+            ]
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "sum by (name, vm_namespace, guest_os_version_id, guest_os_arch, __name__, flavor, container, endpoint, evictable, guest_os_kernel_release, guest_os_machine, guest_os_name, instance, job, namespace, node, os, outdated, phase, pod, prometheus, prometheus_replica, service, vmi_pod, workload) (  \r\n  label_replace(  \r\n    vm_cpu_cores_allocated{job=\"vm-resource-exporter\", exported_namespace=~\"$namespace\", name=~\"$vm\", prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n    \"vm_namespace\", \"$1\", \"exported_namespace\", \"(.*)\"  \r\n  )  \r\n  * on(name, vm_namespace) group_left(flavor, guest_os_version_id, guest_os_arch, __name__, flavor, container, endpoint, evictable, guest_os_kernel_release, guest_os_machine, guest_os_name, instance, job, namespace, node, os, outdated, phase, pod, prometheus, prometheus_replica, service, vmi_pod, workload)  \r\n    label_replace(  \r\n      kubevirt_vmi_info{job=\"kubevirt-prometheus-metrics\", namespace=~\"$namespace\", name=~\"$vm\", prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n      \"vm_namespace\", \"$1\", \"namespace\", \"(.*)\"  \r\n    )  \r\n)  ",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "__auto",
+              "range": false,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "sum by (name, vm_namespace, guest_os_version_id, guest_os_arch, __name__, flavor, container, endpoint, evictable, guest_os_kernel_release, guest_os_machine, guest_os_name, instance, job, namespace, node, os, outdated, phase, pod, prometheus, prometheus_replica, service, vmi_pod, workload) (  \r\n  label_replace(   \r\n    vm_memory_bytes_allocated{job=\"vm-resource-exporter\", exported_namespace=~\"$namespace\", name=~\"$vm\", prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n    \"vm_namespace\", \"$1\", \"exported_namespace\", \"(.*)\"  \r\n  )  \r\n  * on(name, vm_namespace) group_left(flavor, guest_os_version_id, guest_os_arch, __name__, flavor, container, endpoint, evictable, guest_os_kernel_release, guest_os_machine, guest_os_name, instance, job, namespace, node, os, outdated, phase, pod, prometheus, prometheus_replica, service, vmi_pod, workload)  \r\n    label_replace(   \r\n      kubevirt_vmi_info{job=\"kubevirt-prometheus-metrics\", namespace=~\"$namespace\", name=~\"$vm\", prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n      \"vm_namespace\", \"$1\", \"namespace\", \"(.*)\"  \r\n    )  \r\n)  ",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "__auto",
+              "range": false,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "kubevirt_vmi_info{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"\r\n}",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "__auto",
+              "range": false,
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "sum by (name, vm_namespace) (  \r\n  label_replace(  \r\n    label_replace(  \r\n      kube_persistentvolumeclaim_resource_requests_storage_bytes{  \r\n        persistentvolumeclaim=~\"^($vm)-(rootdisk)$\", # Use $vm directly if it's already a regex, or wrap it like `(.+)?`  \r\n        namespace=~\"$namespace\",  \r\n        prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n      \"name\", \"$1\", \"persistentvolumeclaim\", \"^(.*?)-(rootdisk)$\" # Extract VM name  \r\n    ),  \r\n    \"vm_namespace\", \"$1\", \"namespace\", \"(.*)\"  \r\n  )  \r\n) ",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "__auto",
+              "range": false,
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "sum by (name, vm_namespace) (  \r\n  label_replace(  \r\n    label_replace(  \r\n      kube_persistentvolumeclaim_resource_requests_storage_bytes{  \r\n        persistentvolumeclaim=~\"^($vm)-(datadisk)$\", # Use $vm directly if it's already a regex, or wrap it like `(.+)?`  \r\n        namespace=~\"$namespace\",  \r\n        prometheus_replica=\"$fixed_prometheus_replica\"},  \r\n      \"name\", \"$1\", \"persistentvolumeclaim\", \"^(.*?)-(datadisk)$\" # Extract VM name  \r\n    ),  \r\n    \"vm_namespace\", \"$1\", \"namespace\", \"(.*)\"  \r\n  )  \r\n)",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "__auto",
+              "range": false,
+              "refId": "E"
+            }
+          ],
+          "title": "실행 중인 VM 목록",
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Value #A": false,
+                  "Value #C": true,
+                  "__name__": true,
+                  "container": true,
+                  "endpoint": true,
+                  "evictable": true,
+                  "flavor": true,
+                  "guest_os_arch": true,
+                  "guest_os_kernel_release": true,
+                  "guest_os_machine": true,
+                  "guest_os_name": false,
+                  "instance": true,
+                  "instance_type": true,
+                  "job": true,
+                  "namespace": true,
+                  "os": true,
+                  "outdated": true,
+                  "phase": false,
+                  "pod": true,
+                  "preference": true,
+                  "prometheus": true,
+                  "prometheus_replica": true,
+                  "service": true,
+                  "vmi_pod": true,
+                  "workload": true
+                },
+                "includeByName": {},
+                "indexByName": {
+                  "Time": 0,
+                  "Value #A": 9,
+                  "Value #B": 10,
+                  "Value #C": 30,
+                  "Value #D": 31,
+                  "Value #E": 32,
+                  "__name__": 11,
+                  "container": 12,
+                  "endpoint": 13,
+                  "evictable": 14,
+                  "flavor": 3,
+                  "guest_os_arch": 15,
+                  "guest_os_kernel_release": 16,
+                  "guest_os_machine": 27,
+                  "guest_os_name": 5,
+                  "guest_os_version_id": 6,
+                  "instance": 17,
+                  "instance_type": 28,
+                  "job": 18,
+                  "name": 2,
+                  "namespace": 19,
+                  "node": 7,
+                  "os": 4,
+                  "outdated": 20,
+                  "phase": 8,
+                  "pod": 21,
+                  "preference": 29,
+                  "prometheus": 22,
+                  "prometheus_replica": 23,
+                  "service": 24,
+                  "vm_namespace": 1,
+                  "vmi_pod": 25,
+                  "workload": 26
+                },
+                "renameByName": {}
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 11
+          },
+          "id": 21,
+          "panels": [],
+          "title": "📄 요약 현황",
+          "type": "row"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 0,
+            "y": 12
+          },
+          "id": 22,
+          "options": {
+            "code": {
+              "language": "plaintext",
+              "showLineNumbers": false,
+              "showMiniMap": false
+            },
+            "content": "- **전체 VM 수:** ${total_vms}\n- **전체 Running VM 수:** ${running_vms}\n- **전체 Provisioning VM 수:** ${provisioning_vms}\n- **전체 Stopped VM 수:** ${stopped_vms}\n- **전체 Failed VM 수:** ${failed_vms}\n---\n**마지막 업데이트:** ${__to:date:YYYY-MM-DD HH:mm:ss}",
+            "mode": "markdown"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "title": "🖥️ OCP VM 현황",
+          "type": "text"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 4,
+            "y": 12
+          },
+          "id": 2,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "count(kubevirt_vm_info{\r\n  job=\"kubevirt-prometheus-metrics\",\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"\r\n})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "VM 수 (Stopped 포함)",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 90
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 8,
+            "y": 12
+          },
+          "id": 3,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "avg(\r\n  rate(kubevirt_vmi_cpu_usage_seconds_total{\r\n    namespace=~\"$namespace\",\r\n    name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m])\r\n) * 100",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "VM CPU 사용률",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 90
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 12,
+            "y": 12
+          },
+          "id": 4,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "avg(\r\n  kubevirt_vmi_memory_used_bytes{namespace=~\"$namespace\", name=~\"$vm\"}\r\n  /\r\n  kubevirt_vmi_memory_available_bytes{namespace=~\"$namespace\", name=~\"$vm\", prometheus_replica=\"$fixed_prometheus_replica\"}\r\n) * 100",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "VM 메모리 사용률",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 10000000
+                  },
+                  {
+                    "color": "red",
+                    "value": 100000000
+                  }
+                ]
+              },
+              "unit": "binBps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 16,
+            "y": 12
+          },
+          "id": 15,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "avg(\r\n  rate(kubevirt_vmi_network_receive_bytes_total{\r\n    namespace=~\"$namespace\",\r\n    name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m])\r\n)",
+              "instant": false,
+              "legendFormat": "VM 네트워크 수신 I/O",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "avg(\r\n  rate(kubevirt_vmi_network_transmit_bytes_total{\r\n    namespace=~\"$namespace\",\r\n    name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m])\r\n)",
+              "legendFormat": "VM 네트워크 송신 I/O",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "VM Network I/O 평균",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50000000
+                  },
+                  {
+                    "color": "red",
+                    "value": 200000000
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 4,
+            "x": 20,
+            "y": 12
+          },
+          "id": 16,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "avg(\r\n  rate(kubevirt_vmi_storage_read_traffic_bytes_total{\r\n    namespace=~\"$namespace\",\r\n    name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m])\r\n)",
+              "legendFormat": "VM 디스크 읽기 I/O",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "avg(\r\n  rate(kubevirt_vmi_storage_write_traffic_bytes_total{\r\n    namespace=~\"$namespace\",\r\n    name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m])\r\n)",
+              "instant": false,
+              "legendFormat": "VM 디스크 쓰기 I/O",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "VM Disk I/O 평균",
+          "type": "bargauge"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 18
+          },
+          "id": 12,
+          "panels": [],
+          "title": "📊 CPU / Memory",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 19
+          },
+          "id": 5,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(kubevirt_vmi_cpu_usage_seconds_total{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n  prometheus_replica=\"$fixed_prometheus_replica\"}[5m]) * 100",
+              "legendFormat": "\"{{name}}\" | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "VM별 CPU 사용률",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 2,
+              "fieldMinMax": true,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 19
+          },
+          "id": 6,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kubevirt_vmi_memory_used_bytes{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "\"{{name}}\" | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "사용 중인 메모리",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 2,
+              "fieldMinMax": true,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 19
+          },
+          "id": 7,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kubevirt_vmi_memory_available_bytes{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "\"{{name}}\" | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "사용 가능한 메모리",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "id": 17,
+          "panels": [],
+          "title": "⚙️ 네임스페이스별 Resource Quotas",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 160,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 140
+                  },
+                  {
+                    "color": "red",
+                    "value": 150
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 0,
+            "y": 28
+          },
+          "id": 24,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kube_resourcequota{type=\"used\",resource=\"limits.cpu\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "{{namespace}} | used",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "CPU used",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 1202590842880,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "semi-dark-yellow",
+                    "value": 962072674304
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 1022202216448
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 1082331758592
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 8,
+            "y": 28
+          },
+          "id": 27,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kube_resourcequota{type=\"used\",resource=\"limits.memory\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "{{namespace}} | used",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": " 메모리 used",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 10995116277760,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 8796093022208
+                  },
+                  {
+                    "color": "semi-dark-orange",
+                    "value": 9345848836096
+                  },
+                  {
+                    "color": "semi-dark-red",
+                    "value": 9895604649984
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 16,
+            "y": 28
+          },
+          "id": 30,
+          "options": {
+            "minVizHeight": 75,
+            "minVizWidth": 75,
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "sizing": "auto"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "kube_resourcequota{type=\"used\",resource=\"iscsi-sc.storageclass.storage.k8s.io/requests.storage\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "format": "time_series",
+              "instant": false,
+              "legendFormat": "{{namespace}} | used",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "디스크 used",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 0,
+            "y": 33
+          },
+          "id": 25,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "effgrmgus67lse"
+              },
+              "editorMode": "code",
+              "expr": "kube_resourcequota{type=\"hard\",resource=\"limits.cpu\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "instant": false,
+              "legendFormat": "{{namespace}} | hard",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "CPU hard",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 1202590842880,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 8,
+            "y": 33
+          },
+          "id": 28,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kube_resourcequota{type=\"hard\",resource=\"limits.memory\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "{{namespace}} | hard",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "메모리 hard",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 10995116277760,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 16,
+            "y": 33
+          },
+          "id": 29,
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "kube_resourcequota{type=\"hard\",resource=\"iscsi-sc.storageclass.storage.k8s.io/requests.storage\",namespace=~\"$namespace\",prometheus_replica=\"$fixed_prometheus_replica\"}",
+              "legendFormat": "{{namespace}} | hard",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "디스크 hard",
+          "type": "bargauge"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 37
+          },
+          "id": 11,
+          "panels": [],
+          "title": "🌐 Network / 💾 Disk",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 38
+          },
+          "id": 8,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(kubevirt_vmi_network_receive_bytes_total{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}[5m])",
+              "legendFormat": "\"{{name}}\" | In | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "b598a2e3-4e8c-46b8-9a5c-b2e473381408"
+              },
+              "editorMode": "code",
+              "expr": "-rate(kubevirt_vmi_network_transmit_bytes_total{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}[5m])",
+              "instant": false,
+              "legendFormat": "\"{{name}}\" | Out | {{namespace}}  | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Network In/Out",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "effgrmgus67lse"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "binBps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 38
+          },
+          "id": 9,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.4.0-21887950227",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(kubevirt_vmi_storage_read_traffic_bytes_total{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}[5m])",
+              "legendFormat": "\"{{name}}\" | Read | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "b598a2e3-4e8c-46b8-9a5c-b2e473381408"
+              },
+              "editorMode": "code",
+              "expr": "-rate(kubevirt_vmi_storage_write_traffic_bytes_total{\r\n  namespace=~\"$namespace\",\r\n  name=~\"$vm\",\r\n prometheus_replica=\"$fixed_prometheus_replica\"}[5m])",
+              "instant": false,
+              "legendFormat": "\"{{name}}\" | Write | {{namespace}} | {{kubernetes_vmi_label_team}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Disk Read/Write",
+          "type": "timeseries"
+        }
+      ],
+      "preload": false,
+      "refresh": "30s",
+      "schemaVersion": 42,
+      "tags": [
+        "virtualization",
+        "vm"
+      ],
+      "templating": {
+        "list": [
+          {
+            "current": {
+              "text": "All",
+              "value": [
+                "$__all"
+              ]
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count by (exported_namespace) (vm_cpu_cores_allocated{job=\"vm-resource-exporter\",prometheus_replica=\"$fixed_prometheus_replica\"})  )",
+            "includeAll": true,
+            "label": "Namespace_지정",
+            "multi": true,
+            "name": "namespace",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count by (exported_namespace) (vm_cpu_cores_allocated{job=\"vm-resource-exporter\",prometheus_replica=\"$fixed_prometheus_replica\"})  )",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 2,
+            "regex": "/exported_namespace=\\\"([^\\\"]+)\\\"/",
+            "regexApplyTo": "value",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": [
+                "$__all"
+              ]
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count by (name) (kubevirt_vm_info{prometheus_replica=\"$fixed_prometheus_replica\", namespace=~\"$namespace\"}))",
+            "includeAll": true,
+            "label": "VM_지정",
+            "multi": true,
+            "name": "vm",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count by (name) (kubevirt_vm_info{prometheus_replica=\"$fixed_prometheus_replica\", namespace=~\"$namespace\"}))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 2,
+            "regex": "/name=\\\"([^\\\"]+)\\\"/",
+            "regexApplyTo": "value",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "baseFilters": [],
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "filters": [],
+            "name": "Filters",
+            "type": "adhoc"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": [
+                "$__all"
+              ]
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kubevirt_vm_info{prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+            "hide": 2,
+            "includeAll": true,
+            "label": "total_vms_조회",
+            "multi": true,
+            "name": "total_vms",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kubevirt_vm_info{prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": [
+                "$__all"
+              ]
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kubevirt_vm_info{status=\"running\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+            "hide": 2,
+            "includeAll": true,
+            "label": "running_vms_조회",
+            "multi": true,
+            "name": "running_vms",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kubevirt_vm_info{status=\"running\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kubevirt_vm_info{status=~\"provisioning|starting|scheduling|pending\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+            "hide": 2,
+            "includeAll": true,
+            "multi": true,
+            "name": "provisioning_vms",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kubevirt_vm_info{status=~\"provisioning|starting|scheduling|pending\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": [
+                "$__all"
+              ]
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kubevirt_vm_info{status=~\"stopped|stopping|terminating|paused\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+            "hide": 2,
+            "includeAll": true,
+            "label": "stopped_vms_조회",
+            "multi": true,
+            "name": "stopped_vms",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kubevirt_vm_info{status=~\"stopped|stopping|terminating|paused\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "effgrmgus67lse"
+            },
+            "definition": "query_result(count(kubevirt_vm_info{status=~\"failed|error\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+            "hide": 2,
+            "includeAll": true,
+            "multi": true,
+            "name": "failed_vms",
+            "options": [],
+            "query": {
+              "qryType": 3,
+              "query": "query_result(count(kubevirt_vm_info{status=~\"failed|error\",prometheus_replica=\"$fixed_prometheus_replica\"}) or vector(0))",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 1,
+            "regex": "^\\{\\}\\s+(\\d+)\\s+\\d+$",
+            "regexApplyTo": "value",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "prometheus-k8s-0",
+              "value": "prometheus-k8s-0"
+            },
+            "description": "Prometheus replica fixed to prometheus-k8s-0",
+            "includeAll": false,
+            "name": "fixed_prometheus_replica",
+            "options": [],
+            "query": "prometheus-k8s-0",
+            "type": "custom",
+            "valuesFormat": "csv"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "[Sample] 개발실별 VM 모니터링",
+      "uid": "rog48mb3",
+      "version": 4,
+      "weekStart": ""
+    }
+    
