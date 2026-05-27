@@ -2934,14 +2934,14 @@ SPA_HTML = r"""<!DOCTYPE html>
         </div>
         <!-- 노드 상세 차트 패널 (클릭 시 표시) -->
         <div id="node-detail-panel" style="display:none;margin-top:14px;width:100%;">
-          <div class="card">
+          <div class="card" style="width:100%;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
               <div class="sec-title" style="margin-bottom:0;" id="node-detail-title">노드 상세</div>
               <button onclick="document.getElementById('node-detail-panel').style.display='none'"
                 style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
                        padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
             </div>
-            <div id="nd-sqlite-area" style="width:100%;box-sizing:border-box;"></div>
+            <div id="nd-sqlite-area" style="width:100%;min-width:0;box-sizing:border-box;"></div>
             <div style="display:none;grid-template-columns:1fr 1fr;gap:12px;">
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
@@ -3658,10 +3658,11 @@ async function openNodeDetail(nodeName) {
     document.getElementById('node-detail-title').textContent =
       nodeName + ' — CPU / MEM 추이 (oc top · SQLite)';
 
-    const chartArea = panel.querySelector('.card > div:last-child');
+    const chartArea = document.getElementById('nd-sqlite-area');
     if (chartArea) {
       chartArea.innerHTML = `
         <!-- 데이터 소스 안내 배너 -->
+        <div style="width:100%;min-width:0;display:block;">
         <div style="background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);
                     border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px;color:#fbbf24;
                     display:flex;align-items:flex-start;gap:8px;">
@@ -3690,7 +3691,7 @@ async function openNodeDetail(nodeName) {
             </div>`).join('')}
         </div>
         <!-- SQLite 기반 시계열 차트 -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div style="width:100%;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
           <div>
             <div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
               CPU 사용률 (1h)
