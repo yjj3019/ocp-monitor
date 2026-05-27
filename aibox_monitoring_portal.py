@@ -2941,7 +2941,7 @@ SPA_HTML = r"""<!DOCTYPE html>
                 style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
                        padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
             </div>
-            <div id="nd-sqlite-area" style="width:100%;min-width:0;box-sizing:border-box;"></div>
+            <div id="nd-sqlite-area" style="display:block;width:100%;box-sizing:border-box;min-width:0;"></div>
             <div style="display:none;grid-template-columns:1fr 1fr;gap:12px;">
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
@@ -3659,10 +3659,10 @@ async function openNodeDetail(nodeName) {
       nodeName + ' — CPU / MEM 추이 (oc top · SQLite)';
 
     const chartArea = document.getElementById('nd-sqlite-area');
+    if (chartArea) { chartArea.style.cssText = 'width:100%;display:block;box-sizing:border-box;'; }
     if (chartArea) {
       chartArea.innerHTML = `
         <!-- 데이터 소스 안내 배너 -->
-        <div style="width:100%;min-width:0;display:block;">
         <div style="background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);
                     border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px;color:#fbbf24;
                     display:flex;align-items:flex-start;gap:8px;">
