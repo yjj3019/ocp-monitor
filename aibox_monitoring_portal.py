@@ -3660,6 +3660,7 @@ async function openNodeDetail(nodeName) {
 
     const chartArea = document.getElementById('nd-sqlite-area');
     if (chartArea) { chartArea.style.cssText = 'width:100%;display:block;box-sizing:border-box;'; }
+    if (chartArea) { chartArea.style.cssText = 'width:100%;display:block;box-sizing:border-box;'; }
     if (chartArea) {
       chartArea.innerHTML = `
         <!-- 데이터 소스 안내 배너 -->
