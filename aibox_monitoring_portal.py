@@ -371,9 +371,8 @@ class SQLiteManager:
             # 노드 메트릭
             for n in metrics.nodes:
                 c.execute(
-                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status,net_rx_bps,net_tx_bps) VALUES (?,?,?,?,?,?,?)",
-                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status,
-                     getattr(n,"net_rx_bps",None), getattr(n,"net_tx_bps",None)),
+                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status) VALUES (?,?,?,?,?)",
+                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status),
                 )
             # VM 밀집도 (노드별 VM 수)
             density: Dict[str, int] = {}
@@ -2934,7 +2933,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
         <!-- 노드 상세 차트 패널 (클릭 시 표시) -->
-        <div id="node-detail-panel" style="display:none;margin-top:14px;">
+        <div id="node-detail-panel" style="display:none;margin-top:14px;width:100%;">
           <div class="card">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
               <div class="sec-title" style="margin-bottom:0;" id="node-detail-title">노드 상세</div>
@@ -2942,8 +2941,8 @@ SPA_HTML = r"""<!DOCTYPE html>
                 style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
                        padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
             </div>
-            <div id="nd-sqlite-area" style="margin-top:14px;"></div>
-            <div style="display:none;">
+            <div id="nd-sqlite-area" style="width:100%;box-sizing:border-box;"></div>
+            <div style="display:none;grid-template-columns:1fr 1fr;gap:12px;">
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
               <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-net"></canvas></div></div>
@@ -3649,6 +3648,7 @@ function renderNodeCards() {
 async function openNodeDetail(nodeName) {
   const panel = document.getElementById('node-detail-panel');
   panel.style.display = '';
+    panel.style.width = '100%';
   panel.scrollIntoView({behavior:'smooth'});
 
   const node = (state.overview?.nodes || []).find(n => n.name === nodeName) || {};
@@ -3658,7 +3658,7 @@ async function openNodeDetail(nodeName) {
     document.getElementById('node-detail-title').textContent =
       nodeName + ' — CPU / MEM 추이 (oc top · SQLite)';
 
-    const chartArea = document.getElementById('nd-sqlite-area');
+    const chartArea = panel.querySelector('.card > div:last-child');
     if (chartArea) {
       chartArea.innerHTML = `
         <!-- 데이터 소스 안내 배너 -->
@@ -3673,12 +3673,12 @@ async function openNodeDetail(nodeName) {
             <br>• 시계열: oc adm top nodes 30초 간격 SQLite 저장
             <br>• 디스크 I/O: node-exporter Thanos 미노출로 수집 불가
         <!-- Current Usage -->
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:14px;">
           ${[
             ['CPU 현재', fmtPct(node.cpu_pct), node.cpu_pct, '#3b82f6'],
             ['CPU (cores)', node.cpu_usage ? fmtCpuRaw(node.cpu_usage) : '—', null, 'var(--txt-secondary)'],
             ['MEM 현재', fmtPct(node.mem_pct), node.mem_pct, '#a78bfa'],
-            ['MEM', node.mem_usage ? fmtMemRaw(node.mem_usage) : '—', null, 'var(--txt-secondary)'],
+            ['MEM (bytes)', node.mem_usage ? fmtMemRaw(node.mem_usage) : '—', null, 'var(--txt-secondary)'],
             ['Net RX', node.net_rx_bps != null ? fmtBps(node.net_rx_bps) : '수집 중...', null, node.net_rx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
             ['Net TX', node.net_tx_bps != null ? fmtBps(node.net_tx_bps) : '수집 중...', null, node.net_tx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
             ['Disk I/O', '미지원', null, 'var(--txt-muted)'],
@@ -3705,13 +3705,7 @@ async function openNodeDetail(nodeName) {
             </div>
             <div style="height:120px;"><canvas id="nd-sqlite-mem"></canvas></div>
           </div>
-          <div style="grid-column:span 2;margin-top:8px;">
-            <div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
-              Network RX / TX (1h)
-              <span style="font-size:9px;background:rgba(52,211,153,.2);color:#34d399;padding:1px 5px;border-radius:3px;">NetObserv</span>
-            </div>
-            <div style="height:120px;"><canvas id="nd-sqlite-net"></canvas></div>
-          </div>
+          <div style="margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
         </div>
         <div id="nd-sqlite-loading" style="text-align:center;font-size:11px;color:var(--txt-muted);margin-top:8px;">
           SQLite 이력 로딩 중...
@@ -3735,13 +3729,7 @@ async function openNodeDetail(nodeName) {
           [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0, yMax:100});
         mkChart('nd-sqlite-mem', lbl,
           [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
-        if((d.net_rx||[]).some(v=>v>0)){
-          setTimeout(() => {
-            if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}
-            const _netCanvas = document.getElementById("nd-sqlite-net");
-            if(_netCanvas) mkChart("nd-sqlite-net",lbl,[sparkDataset("RX",(d.net_rx||[]).map(v=>(v??0)/1024),"#06b6d4"),sparkDataset("TX",(d.net_tx||[]).map(v=>(v??0)/1024),"#34d399")],{legend:true, yLabel:"KB/s"});
-          }, 100);
-        }
+        if((d.net_rx||[]).some(v=>v>0)){if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}mkChart("nd-sqlite-net",lbl,[sparkDataset("RX",(d.net_rx||[]).map(v=>(v??0)/1024),"#06b6d4"),sparkDataset("TX",(d.net_tx||[]).map(v=>(v??0)/1024),"#34d399")],{legend:true});}
         if (loadingEl) loadingEl.textContent =
           `${d.point_count}개 데이터 포인트 (30s 간격, SQLite)`;
       } else {
