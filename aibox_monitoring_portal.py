@@ -1315,6 +1315,29 @@ class MetricsCollector:
             n.net_rx_bps = netobserv_rx.get(n.name) or d.get("net_rx")
             n.net_tx_bps = netobserv_tx.get(n.name) or d.get("net_tx")
 
+        # ── Ephemeral Storage 용량 알럿 ──────────────────────
+        try:
+            eph_cap = {}
+            for item in self._query('kube_node_status_capacity{resource="ephemeral_storage"}'):
+                node = item.get("metric",{}).get("node","")
+                if node:
+                    try: eph_cap[node] = int(float(item["value"][1]))
+                    except: pass
+            eph_alloc = {}
+            for item in self._query('kube_node_status_allocatable{resource="ephemeral_storage"}'):
+                node = item.get("metric",{}).get("node","")
+                if node:
+                    try: eph_alloc[node] = int(float(item["value"][1]))
+                    except: pass
+            for n in self.metrics.nodes:
+                if n.name in eph_cap:
+                    n.__dict__['eph_capacity_bytes'] = eph_cap[n.name]
+                    n.__dict__['eph_allocatable_bytes'] = eph_alloc.get(n.name, 0)
+            if eph_cap:
+                logger.info("Ephemeral storage 용량: %d개 노드", len(eph_cap))
+        except Exception as _e:
+            logger.debug("Ephemeral storage 쿼리 실패: %s", _e)
+
         logger.info("노드 수집 — CPU/MEM: Metrics API ✅ | Prometheus node-exporter: %d개(미노출 정상) | NetObserv Net: rx=%d tx=%d노드",
                     len(nrt), len(netobserv_rx), len(netobserv_tx))
         return len(nrt)
@@ -1379,6 +1402,33 @@ class MetricsCollector:
             vm_key = (vm.namespace, vm.name)
             vm.net_rx_bps = netobserv_vm_rx.get(vm_key) or d.get("net_rx")
             vm.net_tx_bps = netobserv_vm_tx.get(vm_key) or d.get("net_tx")
+
+        # ── VM 게스트 OS 파일시스템 수집 ──────────────────────────
+        vm_fs_used: dict = {}
+        vm_fs_cap: dict  = {}
+        try:
+            for item in self._query('kubevirt_vmi_filesystem_used_bytes'):
+                m = item.get("metric", {})
+                key = m.get("name", "")
+                if key:
+                    try: vm_fs_used[key] = int(float(item["value"][1]))
+                    except: pass
+            for item in self._query('kubevirt_vmi_filesystem_capacity_bytes'):
+                m = item.get("metric", {})
+                key = m.get("name", "")
+                if key:
+                    try: vm_fs_cap[key] = int(float(item["value"][1]))
+                    except: pass
+            if vm_fs_used:
+                logger.info("VM 파일시스템: %d개 수집", len(vm_fs_used))
+        except Exception as _e:
+            logger.debug("VM 파일시스템 쿼리 실패: %s", _e)
+        for vm in self.metrics.vms:
+            if vm.name in vm_fs_used:
+                vm.__dict__['fs_used_bytes'] = vm_fs_used[vm.name]
+                vm.__dict__['fs_capacity_bytes'] = vm_fs_cap.get(vm.name, 0)
+                cap = vm_fs_cap.get(vm.name, 0)
+                vm.__dict__['fs_pct'] = round(vm_fs_used[vm.name]/cap*100, 1) if cap > 0 else None
             vm.disk_read_bps = d.get("disk_r")
             vm.disk_write_bps = d.get("disk_w")
         return len(rt)
@@ -1769,7 +1819,7 @@ class MetricsCollector:
                     "cpu_usage": n.cpu_usage, "mem_usage": n.memory_usage,
                     "cpu_pct": n.cpu_pct_realtime, "mem_pct": n.memory_pct_realtime,
                     "memory_bytes": n.memory_bytes,
-                    "net_rx_bps": getattr(n,"net_rx_bps",None), "disk_pct": getattr(n,"disk_pct",None), "imagefs_pct": getattr(n,"imagefs_pct",None), "imagefs_used_bytes": getattr(n,"imagefs_used_bytes",None), "imagefs_capacity_bytes": getattr(n,"imagefs_capacity_bytes",None), "disk_used_bytes": getattr(n,"disk_used_bytes",None), "disk_capacity_bytes": getattr(n,"disk_capacity_bytes",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
+                    "net_rx_bps": getattr(n,"net_rx_bps",None), "disk_pct": getattr(n,"disk_pct",None), "eph_capacity_bytes": n.__dict__.get("eph_capacity_bytes"), "eph_allocatable_bytes": n.__dict__.get("eph_allocatable_bytes"), "imagefs_pct": getattr(n,"imagefs_pct",None), "imagefs_used_bytes": getattr(n,"imagefs_used_bytes",None), "imagefs_capacity_bytes": getattr(n,"imagefs_capacity_bytes",None), "disk_used_bytes": getattr(n,"disk_used_bytes",None), "disk_capacity_bytes": getattr(n,"disk_capacity_bytes",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
                 }
                 for n in m.nodes
             ],
@@ -2291,7 +2341,7 @@ details summary{cursor:pointer;font-size:12px;color:#7dd3fc;margin-bottom:8px}
       <thead><tr>
         <th>Name</th><th>Status</th><th>Node</th><th>IP</th>
         <th>CPU Cores</th><th>CPU %</th><th>Memory</th><th>Mem %</th>
-        <th>Net RX</th><th>Net TX</th><th>OS</th><th>Age</th>
+        <th>Net RX</th><th>Net TX</th><th>Ephemeral</th><th>OS</th><th>Age</th>
       </tr></thead>
       <tbody>__VM_ROWS__</tbody>
     </table>
@@ -2592,6 +2642,30 @@ def api_node_conditions():
 def api_vm_trends(namespace: str, vm_name: str, hours: int = Query(1, ge=1, le=24)):
     data = _collector.query_vm_trends(vm_name, namespace, hours)
     return JSONResponse(MetricsCollector._sanitize(data))
+
+# ── Node Top Disk (Pod별 디스크 상위) ───────────────────────────────
+@app.get("/api/v1/nodes/{node_name}/top-disk")
+def api_node_top_disk(node_name: str):
+    try:
+        items = _collector._query(
+            f'topk(10, container_fs_usage_bytes{{id!="/", node="{node_name}"}})'
+        )
+        result = []
+        for item in items:
+            m = item.get("metric", {})
+            try: val = int(float(item["value"][1]))
+            except: val = 0
+            if val > 0:
+                result.append({
+                    "pod": m.get("pod", m.get("id", "?")),
+                    "namespace": m.get("namespace", ""),
+                    "container": m.get("container", ""),
+                    "used_bytes": val,
+                })
+        result.sort(key=lambda x: x["used_bytes"], reverse=True)
+        return JSONResponse({"node": node_name, "top_disk": result[:10]})
+    except Exception as e:
+        return JSONResponse({"node": node_name, "top_disk": [], "error": str(e)})
 
 # ── Alerts Detail ────────────────────────────────────────────────
 @app.get("/api/v1/alerts")
@@ -3041,6 +3115,10 @@ SPA_HTML = r"""<!DOCTYPE html>
             <div class="sec-title" style="color:#f59e0b;">
               <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
               Top 5 · 최대 할당 PV
+        <div class="card" style="margin-top:14px;">
+          <div class="sec-title">CSI Storage Capacity (CephFS)</div>
+          <div id="csi-capacity-list" style="margin-top:10px;"></div>
+        </div>
             </div>
             <div id="top5-pv"></div>
           </div>
@@ -3726,9 +3804,13 @@ async function openNodeDetail(nodeName) {
             </div>
             <div style="height:120px;"><canvas id="nd-sqlite-mem"></canvas></div>
           </div>
-          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
-          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
-          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
+          <div style=""><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
+          <div style=""><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
+          <div style=""><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
+        </div>
+        <div id="nd-top-disk" style="margin-top:14px;display:none;">
+          <div style="font-size:10px;color:var(--txt-muted);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px;">Pod 디스크 상위 <span style="font-size:9px;background:rgba(6,182,212,.15);color:#06b6d4;padding:1px 4px;border-radius:3px;">container_fs</span></div>
+          <div id="nd-top-disk-list"></div>
         </div>
         <div id="nd-sqlite-loading" style="text-align:center;font-size:11px;color:var(--txt-muted);margin-top:8px;">
           SQLite 이력 로딩 중...
@@ -3829,6 +3911,7 @@ function renderNodes(nodes) {
       <td class="mono" style="font-size:10px;color:var(--txt-secondary);"
           title="${n.net_tx_bps==null?(_nodeNetAvailable?'수집 중':'환경 제약: node-exporter 미노출'):''}"
           >${n.net_tx_bps!=null?fmtBps(n.net_tx_bps):(_nodeNetAvailable?'...':'N/A')}${n.net_tx_bps==null&&!_nodeNetAvailable?'⚠':''}</td>
+      <td>${n.eph_capacity_bytes ? ('<span class="badge '+(n.eph_allocatable_bytes/n.eph_capacity_bytes<0.1?'badge-err':n.eph_allocatable_bytes/n.eph_capacity_bytes<0.2?'badge-warn':'badge-ok')+'">'+Math.round((1-n.eph_allocatable_bytes/n.eph_capacity_bytes)*100)+'%</span>') : '<span style="color:var(--txt-muted)">—</span>'}</td>
     </tr>`;
   }).join('');
 }
