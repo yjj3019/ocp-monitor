@@ -2933,20 +2933,16 @@ SPA_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
         <!-- 노드 상세 차트 패널 (클릭 시 표시) -->
-        <div id="node-detail-panel" style="display:none;margin-top:14px;width:100%;">
-          <div class="card" style="width:100%;">
+        <div id="node-detail-panel" style="display:none;margin-top:14px;">
+          <div class="card">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
               <div class="sec-title" style="margin-bottom:0;" id="node-detail-title">노드 상세</div>
               <button onclick="document.getElementById('node-detail-panel').style.display='none'"
                 style="background:var(--bg-card2);border:1px solid var(--bd-bright);color:var(--txt-secondary);
                        padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;">닫기</button>
             </div>
-            <div id="nd-sqlite-area" style="display:block;width:100%;box-sizing:border-box;min-width:0;"></div>
-            <div style="display:none;grid-template-columns:1fr 1fr;gap:12px;">
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">CPU 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-cpu"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">메모리 사용률 (%)</div><div style="height:120px;"><canvas id="nd-chart-mem"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">네트워크 (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-net"></canvas></div></div>
-              <div><div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;">디스크 I/O (bytes/s)</div><div style="height:120px;"><canvas id="nd-chart-disk"></canvas></div></div>
+            <div id="nd-sqlite-area" style="width:100%;box-sizing:border-box;"></div>
+            <div style="width:100%;box-sizing:border-box;">
             </div>
           </div>
         </div>
@@ -3648,7 +3644,6 @@ function renderNodeCards() {
 async function openNodeDetail(nodeName) {
   const panel = document.getElementById('node-detail-panel');
   panel.style.display = '';
-    panel.style.width = '100%';
   panel.scrollIntoView({behavior:'smooth'});
 
   const node = (state.overview?.nodes || []).find(n => n.name === nodeName) || {};
@@ -3659,8 +3654,6 @@ async function openNodeDetail(nodeName) {
       nodeName + ' — CPU / MEM 추이 (oc top · SQLite)';
 
     const chartArea = document.getElementById('nd-sqlite-area');
-    if (chartArea) { chartArea.style.cssText = 'width:100%;display:block;box-sizing:border-box;'; }
-    if (chartArea) { chartArea.style.cssText = 'width:100%;display:block;box-sizing:border-box;'; }
     if (chartArea) {
       chartArea.innerHTML = `
         <!-- 데이터 소스 안내 배너 -->
@@ -3674,6 +3667,8 @@ async function openNodeDetail(nodeName) {
             <br>• Net RX/TX: <strong style="color:#34d399;">NetObserv eBPF 수집 중</strong> ✅
             <br>• 시계열: oc adm top nodes 30초 간격 SQLite 저장
             <br>• 디스크 I/O: node-exporter Thanos 미노출로 수집 불가
+          </div>
+        </div>
         <!-- Current Usage -->
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:14px;">
           ${[
@@ -3692,7 +3687,7 @@ async function openNodeDetail(nodeName) {
             </div>`).join('')}
         </div>
         <!-- SQLite 기반 시계열 차트 -->
-        <div style="width:100%;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;">
           <div>
             <div style="font-size:10px;color:var(--txt-muted);margin-bottom:6px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
               CPU 사용률 (1h)
@@ -3707,7 +3702,7 @@ async function openNodeDetail(nodeName) {
             </div>
             <div style="height:120px;"><canvas id="nd-sqlite-mem"></canvas></div>
           </div>
-          <div style="margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
+          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
         </div>
         <div id="nd-sqlite-loading" style="text-align:center;font-size:11px;color:var(--txt-muted);margin-top:8px;">
           SQLite 이력 로딩 중...
@@ -3731,7 +3726,7 @@ async function openNodeDetail(nodeName) {
           [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0, yMax:100});
         mkChart('nd-sqlite-mem', lbl,
           [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
-        if((d.net_rx||[]).some(v=>v>0)){if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}mkChart("nd-sqlite-net",lbl,[sparkDataset("RX",(d.net_rx||[]).map(v=>(v??0)/1024),"#06b6d4"),sparkDataset("TX",(d.net_tx||[]).map(v=>(v??0)/1024),"#34d399")],{legend:true});}
+        if((d.net_rx||[]).some(v=>v!=null)){if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}mkChart("nd-sqlite-net",lbl,[sparkDataset("RX",(d.net_rx||[]).map(v=>v??0)/1024,"#06b6d4"),sparkDataset("TX",(d.net_tx||[]).map(v=>v??0)/1024,"#34d399")],{legend:true});}
         if (loadingEl) loadingEl.textContent =
           `${d.point_count}개 데이터 포인트 (30s 간격, SQLite)`;
       } else {
