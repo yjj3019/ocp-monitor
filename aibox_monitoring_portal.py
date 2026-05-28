@@ -168,6 +168,12 @@ class VMMetrics:
     memory_used_bytes: int = 0
     net_rx_bps: Optional[float] = None
     net_tx_bps: Optional[float] = None
+    disk_used_bytes: Optional[int] = None
+    disk_capacity_bytes: Optional[int] = None
+    disk_pct: Optional[float] = None
+    imagefs_pct: Optional[float] = None
+    imagefs_used_bytes: Optional[int] = None
+    imagefs_capacity_bytes: Optional[int] = None
     disk_read_bps: Optional[float] = None
     disk_write_bps: Optional[float] = None
 
@@ -271,7 +277,7 @@ class SQLiteManager:
                 CREATE TABLE IF NOT EXISTS node_metrics_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
-                    node_name TEXT, cpu_pct REAL, mem_pct REAL, status TEXT
+                    node_name TEXT, cpu_pct REAL, mem_pct REAL, status TEXT, net_rx_bps REAL DEFAULT NULL, net_tx_bps REAL DEFAULT NULL, disk_pct REAL DEFAULT NULL, imagefs_pct REAL DEFAULT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_nmh_ts ON node_metrics_history(timestamp);
 
@@ -371,8 +377,9 @@ class SQLiteManager:
             # 노드 메트릭
             for n in metrics.nodes:
                 c.execute(
-                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status) VALUES (?,?,?,?,?)",
-                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status),
+                    "INSERT INTO node_metrics_history (timestamp,node_name,cpu_pct,mem_pct,status,net_rx_bps,net_tx_bps,disk_pct,imagefs_pct) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (now, n.name, n.cpu_pct_realtime, n.memory_pct_realtime, n.status,
+                     getattr(n,"net_rx_bps",None), getattr(n,"net_tx_bps",None), getattr(n,"disk_pct",None), getattr(n,"imagefs_pct",None)),
                 )
             # VM 밀집도 (노드별 VM 수)
             density: Dict[str, int] = {}
@@ -606,7 +613,7 @@ class SQLiteManager:
         with self._conn() as conn:
             try:
                 rows = conn.execute(
-                    "SELECT timestamp, cpu_pct, mem_pct, net_rx_bps, net_tx_bps FROM node_metrics_history "
+                    "SELECT timestamp, cpu_pct, mem_pct, net_rx_bps, net_tx_bps, disk_pct, imagefs_pct FROM node_metrics_history "
                     "WHERE node_name=? AND timestamp > ? ORDER BY timestamp ASC",
                     (node_name, cutoff),
                 ).fetchall()
@@ -614,7 +621,7 @@ class SQLiteManager:
                 net_tx = [r["net_tx_bps"] for r in rows]
             except Exception:
                 rows = conn.execute(
-                    "SELECT timestamp, cpu_pct, mem_pct FROM node_metrics_history "
+                    "SELECT timestamp, cpu_pct, mem_pct, net_rx_bps, net_tx_bps, disk_pct FROM node_metrics_history "
                     "WHERE node_name=? AND timestamp > ? ORDER BY timestamp ASC",
                     (node_name, cutoff),
                 ).fetchall()
@@ -624,8 +631,8 @@ class SQLiteManager:
         cpu    = [r["cpu_pct"] for r in rows]
         mem    = [r["mem_pct"] for r in rows]
         return {"labels": labels, "cpu": cpu, "mem": mem,
-                "net_rx": net_rx, "net_tx": net_tx,
-                "source": "sqlite_cli", "node": node_name,
+                "net_rx": net_rx, "net_tx": net_tx, "disk_pct": [r["disk_pct"] if "disk_pct" in r.keys() else None for r in rows], "imagefs_pct": [r["imagefs_pct"] if "imagefs_pct" in r.keys() else None for r in rows],
+                "net_rx": [r["net_rx_bps"] if "net_rx_bps" in r.keys() else None for r in rows], "net_tx": [r["net_tx_bps"] if "net_tx_bps" in r.keys() else None for r in rows], "source": "sqlite_cli", "node": node_name,
                 "point_count": len(rows)}
 
     def get_infra_trend(self, hours: int = 1) -> Dict[str, Any]:
@@ -1289,6 +1296,22 @@ class MetricsCollector:
                 n.cpu_pct_realtime = d["cpu"]
             if d.get("mem") is not None:
                 n.memory_pct_realtime = d["mem"]
+            # kubelet stats API 디스크 수집
+            try:
+                _dr = self._run(["oc","get","--raw",f"/api/v1/nodes/{n.name}/proxy/stats/summary"],timeout=10,silent=True)
+                if _dr:
+                    _ds = __import__("json").loads(_dr)
+                    _fs = _ds.get("node",{}).get("fs",{})
+                    if _fs.get("capacityBytes",0) > 0:
+                        n.disk_used_bytes = _fs.get("usedBytes",0)
+                        n.disk_capacity_bytes = _fs.get("capacityBytes",0)
+                        n.disk_pct = round(_fs["usedBytes"]/_fs["capacityBytes"]*100,1)
+                        _ifs = _ds.get("node",{}).get("runtime",{}).get("imageFs",{})
+                        if _ifs.get("capacityBytes",0) > 0:
+                            n.imagefs_pct = round(_ifs["usedBytes"]/_ifs["capacityBytes"]*100,1)
+                            n.imagefs_used_bytes = _ifs.get("usedBytes",0)
+                            n.imagefs_capacity_bytes = _ifs.get("capacityBytes",0)
+            except Exception: pass
             n.net_rx_bps = netobserv_rx.get(n.name) or d.get("net_rx")
             n.net_tx_bps = netobserv_tx.get(n.name) or d.get("net_tx")
 
@@ -1746,7 +1769,7 @@ class MetricsCollector:
                     "cpu_usage": n.cpu_usage, "mem_usage": n.memory_usage,
                     "cpu_pct": n.cpu_pct_realtime, "mem_pct": n.memory_pct_realtime,
                     "memory_bytes": n.memory_bytes,
-                    "net_rx_bps": getattr(n,"net_rx_bps",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
+                    "net_rx_bps": getattr(n,"net_rx_bps",None), "disk_pct": getattr(n,"disk_pct",None), "imagefs_pct": getattr(n,"imagefs_pct",None), "imagefs_used_bytes": getattr(n,"imagefs_used_bytes",None), "imagefs_capacity_bytes": getattr(n,"imagefs_capacity_bytes",None), "disk_used_bytes": getattr(n,"disk_used_bytes",None), "disk_capacity_bytes": getattr(n,"disk_capacity_bytes",None), "net_tx_bps": getattr(n,"net_tx_bps",None),
                 }
                 for n in m.nodes
             ],
@@ -2914,7 +2937,7 @@ SPA_HTML = r"""<!DOCTYPE html>
       <!-- PAGE: NODES -->
       <div id="page-nodes" class="page" style="display:none;">
         <!-- 노드 개별 상태 카드 (kube_node_status_condition) -->
-        <div id="node-condition-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px;"></div>
+        <div id="node-condition-cards" style="display:none;" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px;"></div>
         <!-- 노드 테이블 -->
         <div class="card">
           <div class="sec-title" style="justify-content:space-between;">
@@ -3678,7 +3701,8 @@ async function openNodeDetail(nodeName) {
             ['MEM (bytes)', node.mem_usage ? fmtMemRaw(node.mem_usage) : '—', null, 'var(--txt-secondary)'],
             ['Net RX', node.net_rx_bps != null ? fmtBps(node.net_rx_bps) : '수집 중...', null, node.net_rx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
             ['Net TX', node.net_tx_bps != null ? fmtBps(node.net_tx_bps) : '수집 중...', null, node.net_tx_bps != null ? 'var(--accent2)' : 'var(--txt-muted)'],
-            ['Disk I/O', '미지원', null, 'var(--txt-muted)'],
+            ['nodefs', node.disk_pct != null ? node.disk_pct.toFixed(1)+'%  ('+fmtBytes(node.disk_used_bytes)+' / '+fmtBytes(node.disk_capacity_bytes)+')' : '수집 중...', node.disk_pct, node.disk_pct > 90 ? 'var(--danger)' : node.disk_pct > 70 ? 'var(--warn)' : 'var(--success)'],
+            ['imagefs', node.imagefs_pct != null ? node.imagefs_pct.toFixed(1)+'%  ('+fmtBytes(node.imagefs_used_bytes)+' / '+fmtBytes(node.imagefs_capacity_bytes)+')' : '수집 중...', node.imagefs_pct, node.imagefs_pct > 90 ? 'var(--danger)' : node.imagefs_pct > 70 ? 'var(--warn)' : 'var(--success)'],
           ].map(([lbl,val,pct,color]) => `
             <div style="background:var(--bg-card2);border:1px solid var(--bd);border-radius:7px;padding:10px;text-align:center;">
               <div style="font-size:9px;color:var(--txt-muted);text-transform:uppercase;margin-bottom:5px;">${lbl}</div>
@@ -3703,6 +3727,8 @@ async function openNodeDetail(nodeName) {
             <div style="height:120px;"><canvas id="nd-sqlite-mem"></canvas></div>
           </div>
           <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Network RX/TX (1h) <span style="font-size:9px;color:#34d399;background:rgba(52,211,153,.15);padding:1px 4px;border-radius:3px;">NetObserv</span></div><div style="height:100px;"><canvas id="nd-sqlite-net"></canvas></div></div>
+          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
+          <div style="grid-column:span 2;margin-top:10px;"><div style="font-size:10px;color:var(--txt-muted);margin-bottom:4px;text-transform:uppercase;display:flex;align-items:center;gap:6px;">Disk 사용률 추이 (1h)<span style="font-size:9px;color:#f59e0b;background:rgba(245,158,11,.15);padding:1px 4px;border-radius:3px;">kubelet</span></div><div style="height:100px;"><canvas id="nd-sqlite-disk"></canvas></div></div>
         </div>
         <div id="nd-sqlite-loading" style="text-align:center;font-size:11px;color:var(--txt-muted);margin-top:8px;">
           SQLite 이력 로딩 중...
@@ -3726,7 +3752,22 @@ async function openNodeDetail(nodeName) {
           [sparkDataset('CPU %', d.cpu||[], '#3b82f6')], {yMin:0, yMax:100});
         mkChart('nd-sqlite-mem', lbl,
           [sparkDataset('MEM %', d.mem||[], '#a78bfa')], {yMin:0, yMax:100});
-        if((d.net_rx||[]).some(v=>v!=null)){if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}mkChart("nd-sqlite-net",lbl,[sparkDataset("RX",(d.net_rx||[]).map(v=>v??0)/1024,"#06b6d4"),sparkDataset("TX",(d.net_tx||[]).map(v=>v??0)/1024,"#34d399")],{legend:true});}
+        if((d.net_rx||[]).some(v=>v!=null && v>0)){
+          const _nr=(d.net_rx||[]).map(v=>(v??0)/1024);
+          const _nt=(d.net_tx||[]).map(v=>(v??0)/1024);
+          if(state.charts["nd-sqlite-net"]){state.charts["nd-sqlite-net"].destroy();delete state.charts["nd-sqlite-net"];}
+          const _c=document.getElementById("nd-sqlite-net");
+          if(_c) mkChart("nd-sqlite-net",lbl,[sparkDataset("RX KB/s",_nr,"#06b6d4"),sparkDataset("TX KB/s",_nt,"#34d399")],{legend:true});
+        // Disk 사용률 차트
+        setTimeout(()=>{
+          const _dp=(d.disk_pct||[]).filter(v=>v!=null);
+          if(_dp.length>0){
+            if(state.charts["nd-sqlite-disk"]){state.charts["nd-sqlite-disk"].destroy();delete state.charts["nd-sqlite-disk"];}
+            const _dc=document.getElementById("nd-sqlite-disk");
+            if(_dc) mkChart("nd-sqlite-disk",lbl,[sparkDataset("nodefs %",(d.disk_pct||[]).map(v=>v??0),"#f59e0b"),sparkDataset("imagefs %",(d.imagefs_pct||[]).map(v=>v??0),"#fb923c")],{yMin:0,yMax:100,legend:true});
+          }
+        },300);
+        }
         if (loadingEl) loadingEl.textContent =
           `${d.point_count}개 데이터 포인트 (30s 간격, SQLite)`;
       } else {
