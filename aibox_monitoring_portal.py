@@ -846,6 +846,37 @@ class MetricsCollector:
             return data.get("data", {}).get("result", [])
         return None
 
+    def _cluster_net_rx(self) -> float:
+        try:
+            r = self._query("sum(rate(netobserv_node_ingress_bytes_total[5m]))")
+            return float(r[0]["value"][1]) if r else 0.0
+        except: return 0.0
+
+    def _cluster_net_tx(self) -> float:
+        try:
+            r = self._query("sum(rate(netobserv_node_egress_bytes_total[5m]))")
+            return float(r[0]["value"][1]) if r else 0.0
+        except: return 0.0
+
+    def _query_direct(self, promql: str, timeout: int = 15) -> List[Dict]:
+        """클러스터 Prometheus 직접 쿼리 (Thanos 미노출 메트릭용)"""
+        import subprocess as _sp, json as _j, urllib.parse as _up
+        try:
+            encoded = _up.quote(promql)
+            raw = _sp.run(
+                ["oc","exec","-n","openshift-monitoring","prometheus-k8s-0",
+                 "-c","prometheus","--",
+                 "wget","-qO-",f"http://localhost:9090/api/v1/query?query={encoded}"],
+                capture_output=True, text=True, timeout=timeout
+            )
+            if raw.returncode != 0 or not raw.stdout.strip():
+                return []
+            data = _j.loads(raw.stdout)
+            return data.get("data", {}).get("result", [])
+        except Exception as _e:
+            logger.debug("direct query 실패: %s", _e)
+            return []
+
     def _query(self, promql: str) -> List[Dict]:
         if not self._prom_strategy: return []
         if self._prom_strategy == "raw":
@@ -1015,7 +1046,7 @@ class MetricsCollector:
                 mem_t = domain.get("resources", {}).get("requests", {}).get("memory", "N/A")
                 vols = [
                     {"name": v.get("name", "N/A"),
-                     "pvc": v.get("persistentVolumeClaim", {}).get("claimName", "N/A")}
+                     "pvc": v.get("persistentVolumeClaim", {}).get("claimName") or v.get("dataVolume", {}).get("name") or "N/A"}
                     for v in vm.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
                 ]
                 vi = vmis.get((name, ns), {})
@@ -1109,7 +1140,7 @@ class MetricsCollector:
             "mem": 'clamp_min((1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100, 0)',
         })
         with ThreadPoolExecutor(max_workers=max(len(queries), 1)) as ex:
-            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
+            futs = {ex.submit(self._query_direct, q): k for k, q in queries.items()}
             for fut in as_completed(futs):
                 k = futs[fut]
                 val = self._scalar(fut.result())
@@ -1338,6 +1369,15 @@ class MetricsCollector:
         except Exception as _e:
             logger.debug("Ephemeral storage 쿼리 실패: %s", _e)
 
+                # 디스크 90% 초과 경고
+        for n in self.metrics.nodes:
+            dp = getattr(n, 'disk_pct', None)
+            ip = getattr(n, 'imagefs_pct', None)
+            if dp and dp > 90:
+                logger.warning("⚠ %s nodefs %.1f%% 초과!", n.name, dp)
+            if ip and ip > 90:
+                logger.warning("⚠ %s imagefs %.1f%% 초과!", n.name, ip)
+
         logger.info("노드 수집 — CPU/MEM: Metrics API ✅ | Prometheus node-exporter: %d개(미노출 정상) | NetObserv Net: rx=%d tx=%d노드",
                     len(nrt), len(netobserv_rx), len(netobserv_tx))
         return len(nrt)
@@ -1371,26 +1411,43 @@ class MetricsCollector:
         except Exception as e:
             logger.debug("NetObserv VM 쿼리 실패: %s", e)
 
-        queries = {
-            "cpu_pct": "rate(kubevirt_vmi_cpu_usage_seconds_total[5m]) * 100",
-            "mem_used": "kubevirt_vmi_memory_used_bytes",
-            "mem_avail": "kubevirt_vmi_memory_available_bytes",
-            "net_rx": "rate(kubevirt_vmi_network_receive_bytes_total[5m])",
-            "net_tx": "rate(kubevirt_vmi_network_transmit_bytes_total[5m])",
-            "disk_r": "rate(kubevirt_vmi_storage_read_traffic_bytes_total[5m])",
-            "disk_w": "rate(kubevirt_vmi_storage_write_traffic_bytes_total[5m])",
-        }
+        # ── kubevirt 메트릭 직접 수집 ──────────────────────────────
         rt: Dict[Tuple[str, str], Dict[str, float]] = {}
-        with ThreadPoolExecutor(max_workers=len(queries)) as ex:
-            futs = {ex.submit(self._query, q): k for k, q in queries.items()}
-            for fut in as_completed(futs):
-                k = futs[fut]
-                for item in fut.result():
-                    lbl = item.get("metric", {})
-                    name, ns = lbl.get("name", ""), lbl.get("namespace", "")
-                    if not name or not ns: continue
-                    try: rt.setdefault((name, ns), {})[k] = float(item["value"][1])
-                    except Exception: pass
+        import threading as _th
+        _rt_lock = _th.Lock()
+
+        def _kv_fetch(promql: str, key: str):
+            # vcpu는 job 필터 없이, 나머지는 kubevirt-prometheus-metrics job
+            if "vcpu" in promql:
+                ql = promql
+            else:
+                ql = f'{promql}{{job="kubevirt-prometheus-metrics"}}'
+            for item in self._query_direct(ql):
+                lbl = item.get("metric", {})
+                name = lbl.get("name", "")
+                ns   = lbl.get("namespace", "")
+                if not name or not ns: continue
+                try:
+                    val = float(item["value"][1])
+                    with _rt_lock:
+                        rt.setdefault((name, ns), {})[key] = val
+                except Exception: pass
+
+        with ThreadPoolExecutor(max_workers=7) as ex:
+            _futs = [
+                ex.submit(_kv_fetch, "rate(kubevirt_vmi_vcpu_seconds_total[5m]) * 100", "cpu_pct"),
+                ex.submit(_kv_fetch, "kubevirt_vmi_memory_used_bytes", "mem_used"),
+                ex.submit(_kv_fetch, "kubevirt_vmi_memory_available_bytes", "mem_avail"),
+                ex.submit(_kv_fetch, "rate(kubevirt_vmi_network_receive_bytes_total[5m])", "net_rx"),
+                ex.submit(_kv_fetch, "rate(kubevirt_vmi_network_transmit_bytes_total[5m])", "net_tx"),
+                ex.submit(_kv_fetch, "rate(kubevirt_vmi_storage_read_traffic_bytes_total[5m])", "disk_r"),
+                ex.submit(_kv_fetch, "rate(kubevirt_vmi_storage_write_traffic_bytes_total[5m])", "disk_w"),
+            ]
+            for _f in as_completed(_futs):
+                try: _f.result()
+                except Exception: pass
+        logger.info("VM 실시간 kubevirt: %d개 VM", len(rt))
+
         for vm in self.metrics.vms:
             d = rt.get((vm.name, vm.namespace), {})
             vm.cpu_usage_pct = d.get("cpu_pct")
@@ -1407,13 +1464,15 @@ class MetricsCollector:
         vm_fs_used: dict = {}
         vm_fs_cap: dict  = {}
         try:
-            for item in self._query('kubevirt_vmi_filesystem_used_bytes'):
+            for item in self._query_direct('kubevirt_vmi_filesystem_used_bytes{job="kubevirt-prometheus-metrics"}'):
                 m = item.get("metric", {})
-                key = m.get("name", "")
-                if key:
+                name = m.get("name", "")
+                ns = m.get("namespace", "")
+                key = f"{ns}/{name}"
+                if name and ns:
                     try: vm_fs_used[key] = int(float(item["value"][1]))
                     except: pass
-            for item in self._query('kubevirt_vmi_filesystem_capacity_bytes'):
+            for item in self._query_direct('kubevirt_vmi_filesystem_capacity_bytes{job="kubevirt-prometheus-metrics"}'):
                 m = item.get("metric", {})
                 key = m.get("name", "")
                 if key:
@@ -1424,11 +1483,12 @@ class MetricsCollector:
         except Exception as _e:
             logger.debug("VM 파일시스템 쿼리 실패: %s", _e)
         for vm in self.metrics.vms:
-            if vm.name in vm_fs_used:
-                vm.__dict__['fs_used_bytes'] = vm_fs_used[vm.name]
-                vm.__dict__['fs_capacity_bytes'] = vm_fs_cap.get(vm.name, 0)
-                cap = vm_fs_cap.get(vm.name, 0)
-                vm.__dict__['fs_pct'] = round(vm_fs_used[vm.name]/cap*100, 1) if cap > 0 else None
+            _fkey = f"{vm.namespace}/{vm.name}"
+            if _fkey in vm_fs_used:
+                vm.__dict__['fs_used_bytes'] = vm_fs_used[_fkey]
+                vm.__dict__['fs_capacity_bytes'] = vm_fs_cap.get(_fkey, 0)
+                cap = vm_fs_cap.get(_fkey, 0)
+                vm.__dict__['fs_pct'] = round(vm_fs_used[_fkey]/cap*100, 1) if cap > 0 else None
             vm.disk_read_bps = d.get("disk_r")
             vm.disk_write_bps = d.get("disk_w")
         return len(rt)
@@ -1459,6 +1519,72 @@ class MetricsCollector:
                 elif k == "al": pt.api_latency_p99 = vals
         return len(tq)
 
+    def fetch_vm_pvc_capacity(self) -> int:
+        """VM volumes에 PVC 용량 매핑 (kube_persistentvolumeclaim)"""
+        try:
+            pvc_cap = {}
+            for item in self._query(
+                'kube_persistentvolumeclaim_resource_requests_storage_bytes'
+            ):
+                m = item.get("metric", {})
+                ns = m.get("namespace", "")
+                pvc = m.get("persistentvolumeclaim", "")
+                if ns and pvc:
+                    try: pvc_cap[(ns, pvc)] = int(float(item["value"][1]))
+                    except: pass
+            updated = 0
+            for vm in self.metrics.vms:
+                for vol in getattr(vm, 'volumes', []):
+                    pvc_name = vol.get("pvc") or vol.get("pvc_name") or ""
+                    if pvc_name and pvc_name != "N/A":
+                        cap = pvc_cap.get((vm.namespace, pvc_name))
+                        if cap:
+                            vol["capacity_bytes"] = cap
+                            vol["capacity"] = self._fmt_bytes(cap)
+                            updated += 1
+            if updated:
+                logger.info("VM PVC 용량 매핑: %d개", updated)
+            return updated
+        except Exception as _e:
+            logger.debug("VM PVC 용량 실패: %s", _e)
+            return 0
+
+    @staticmethod
+    def _fmt_bytes(b: int) -> str:
+        for unit in ["B","Ki","Mi","Gi","Ti"]:
+            if b < 1024: return f"{b:.1f} {unit}"
+            b //= 1024
+        return f"{b} Pi"
+
+    def fetch_vmi_spec(self) -> int:
+        """VMI spec에서 CPU cores, Memory 수집"""
+        import subprocess as _sp, json as _j
+        try:
+            r = _sp.run(["oc","get","vmi","-A","-o","json"],
+                capture_output=True, text=True, timeout=20)
+            if r.returncode != 0: return 0
+            vmi_map = {}
+            for item in _j.loads(r.stdout).get("items", []):
+                meta = item.get("metadata", {})
+                domain = item.get("spec", {}).get("domain", {})
+                cpu = domain.get("cpu", {})
+                cores = str(int(cpu.get("cores", cpu.get("sockets", 1)) or 1))
+                mem = (domain.get("memory", {}).get("guest", "") or
+                       domain.get("resources", {}).get("requests", {}).get("memory", "N/A"))
+                vmi_map[(meta.get("namespace",""), meta.get("name",""))] = (cores, mem)
+            updated = 0
+            for vm in self.metrics.vms:
+                info = vmi_map.get((vm.namespace, vm.name))
+                if info:
+                    if vm.cpu_cores in ("N/A", "", None): vm.cpu_cores = info[0]
+                    if vm.memory_total in ("N/A", "", None): vm.memory_total = info[1]
+                    updated += 1
+            logger.info("VMI spec 보완: %d개 VM", updated)
+            return updated
+        except Exception as _e:
+            logger.debug("VMI spec 실패: %s", _e)
+            return 0
+
     def collect_all(self) -> List[MetricCollectionResult]:
         """모든 메트릭 수집. 결과 목록 반환."""
         with self._lock:
@@ -1479,6 +1605,8 @@ class MetricsCollector:
             ("pvc_disk_stats", self.fetch_pvc_disk_stats),
             ("alerts_detail", self.fetch_alerts_detail),
             ("route_probes", self.fetch_route_probes),
+            ("vmi_spec", self.fetch_vmi_spec),
+            ("vm_pvc", self.fetch_vm_pvc_capacity),
             ("uwm_status", self.fetch_uwm_status),
         ]
         results = []
@@ -2641,7 +2769,7 @@ def api_node_conditions():
 @app.get("/api/v1/vms/{namespace}/{vm_name}/trends")
 def api_vm_trends(namespace: str, vm_name: str, hours: int = Query(1, ge=1, le=24)):
     data = _collector.query_vm_trends(vm_name, namespace, hours)
-    return JSONResponse(MetricsCollector._sanitize(data))
+    return JSONResponse(_sanitize_json(data))
 
 # ── Node Top Disk (Pod별 디스크 상위) ───────────────────────────────
 @app.get("/api/v1/nodes/{node_name}/top-disk")
